@@ -51,6 +51,21 @@ def test_all_flags_parse():
     assert args.threshold_config == "config/config.yaml"
 
 
-def test_main_returns_zero(capsys):
-    assert main(["--once"]) == 0
-    assert "arguments parsed" in capsys.readouterr().out
+def test_once_writes_host_info(tmp_path, monkeypatch, capsys):
+    import json
+
+    from sysmon import cli
+
+    monkeypatch.setattr(cli, "ONCE_SAMPLE_SECONDS", 0.0)
+    assert main(["--once", "--output-dir", str(tmp_path)]) == 0
+    data = json.loads((tmp_path / "host_info.json").read_text(encoding="utf-8"))
+    assert {"hostname", "os_name", "architecture", "uptime_seconds"} <= data.keys()
+    out = capsys.readouterr().out
+    assert "== Host ==" in out and "== Resources ==" in out
+
+
+def test_unwritable_output_dir_exits_2(tmp_path, capsys):
+    blocker = tmp_path / "a_file"
+    blocker.write_text("x")
+    assert main(["--once", "--output-dir", str(blocker / "sub")]) == 2
+    assert "cannot write to output directory" in capsys.readouterr().err
