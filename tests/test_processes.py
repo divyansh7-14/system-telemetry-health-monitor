@@ -10,8 +10,9 @@ MB = 1024**2
 
 
 class FakeProc:
-    def __init__(self, pid, name, cpu, rss, user="alice", user_error=None):
+    def __init__(self, pid, name, cpu, rss, user="alice", user_error=None, ppid=1):
         self.pid = pid
+        self._ppid = ppid
         self.info = {
             "pid": pid,
             "name": name,
@@ -21,6 +22,11 @@ class FakeProc:
         }
         self._user, self._user_error = user, user_error
         self.username_calls = 0
+
+    def ppid(self):
+        if isinstance(self._ppid, Exception):
+            raise self._ppid
+        return self._ppid
 
     def username(self):
         self.username_calls += 1
@@ -97,3 +103,18 @@ def test_real_machine_smoke():
     assert top.total_processes > 1
     assert os.getpid() in [p.pid for p in top.by_memory]
     assert all(0.0 <= p.cpu_percent <= 100.0 for p in top.by_cpu)
+
+
+def test_unnamed_windows_kernel_process_gets_a_label(monkeypatch):
+    """Seen on Windows CI: PID 92, child of System (PID 4), name '' (Memory Compression etc.)."""
+    from sysmon.collectors.processes import PROTECTED_LABEL, UNKNOWN_LABEL
+
+    table = [
+        FakeProc(92, "", 5.0, 400 * MB, ppid=4),
+        FakeProc(93, None, 4.0, 300 * MB, ppid=700),
+        FakeProc(94, "", 3.0, 200 * MB, ppid=psutil.NoSuchProcess(94)),
+    ]
+    monkeypatch.setattr(psutil, "cpu_count", lambda logical=True: 1)
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs=None, ad_value=None: iter(table))
+    names = {p.pid: p.name for p in ProcessSampler(top_n=3).sample().by_cpu}
+    assert names == {92: PROTECTED_LABEL, 93: UNKNOWN_LABEL, 94: UNKNOWN_LABEL}

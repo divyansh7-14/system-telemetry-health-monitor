@@ -60,7 +60,7 @@ class DiskStats:
 @dataclass(frozen=True)
 class ProcessInfo:
     pid: int
-    name: str | None
+    name: str  # a bracketed label such as "[protected system process]" if unreadable
     username: str | None  # None when the OS denies access (e.g. SYSTEM processes)
     cpu_percent: float  # share of the whole machine, 0-100 (like Task Manager)
     memory_rss_bytes: int

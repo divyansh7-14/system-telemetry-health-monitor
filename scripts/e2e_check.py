@@ -505,20 +505,17 @@ def phase2(out: Path, rep: Report) -> None:
         if not p["name"]
     ]
     rep.check("process names present", not unnamed, f"(cycle, pid, cpu, rss) unnamed: {unnamed}")
-    if IS_WINDOWS:
-        # Diagnose: which processes does psutil fail to name, and why?
-        diag = []
-        for proc in psutil.process_iter(["pid", "name"], ad_value=None):
-            if proc.info["name"]:
-                continue
-            row = {"pid": proc.pid}
-            for attr in ("name", "exe", "status", "ppid"):
-                try:
-                    row[attr] = getattr(proc, attr)()
-                except psutil.Error as exc:
-                    row[attr] = type(exc).__name__
-            diag.append(row)
-        rep.info(f"processes psutil cannot name: {diag}")
+    # Deterministic version of the above: rank *every* process, none may be blank.
+    from sysmon.collectors.processes import ProcessSampler
+
+    everyone = ProcessSampler(top_n=100_000).sample().by_memory
+    blanks = [p.pid for p in everyone if not p.name]
+    labelled = [(p.pid, p.name) for p in everyone if p.name.startswith("[")]
+    rep.check(
+        "every running process has a name or label",
+        not blanks and len(everyone) > 10,
+        f"{len(everyone)} processes, blank={blanks}, labelled={labelled}",
+    )
 
     # --- network identity and counters
     net = final[-1]["network"]

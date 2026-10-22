@@ -28,6 +28,12 @@ log = logging.getLogger(__name__)
 _ATTRS = ["pid", "name", "cpu_percent", "memory_info", "memory_percent"]
 # PID 0 is "System Idle Process" on Windows: its "CPU" is idle time, not load.
 _SKIP_PIDS = {0}
+# Windows kernel-managed processes started by "System" (PID 4), such as Memory
+# Compression, Registry and Secure System, do not expose their name to user-mode
+# APIs, so psutil returns "". Label them instead of showing a blank.
+_WINDOWS_SYSTEM_PID = 4
+PROTECTED_LABEL = "[protected system process]"
+UNKNOWN_LABEL = "[unknown]"
 
 
 class ProcessSampler:
@@ -75,9 +81,17 @@ class ProcessSampler:
             username = None
         return ProcessInfo(
             pid=info["pid"],
-            name=info.get("name"),
+            name=info.get("name") or _label_unnamed(proc),
             username=username,
             cpu_percent=round((info.get("cpu_percent") or 0.0) / self._cores, 1),
             memory_rss_bytes=mi.rss if mi else 0,
             memory_percent=round(info.get("memory_percent") or 0.0, 2),
         )
+
+
+def _label_unnamed(proc: psutil.Process) -> str:
+    try:
+        parent = proc.ppid()
+    except psutil.Error:
+        return UNKNOWN_LABEL
+    return PROTECTED_LABEL if parent == _WINDOWS_SYSTEM_PID else UNKNOWN_LABEL

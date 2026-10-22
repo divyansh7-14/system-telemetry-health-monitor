@@ -68,14 +68,11 @@ def format_snapshot(s: Snapshot) -> str:
     if s.top_processes:
         t = s.top_processes
         lines.append(
-            "    top CPU: "
-            + ", ".join(f"{p.name or '?'}[{p.pid}] {p.cpu_percent:.1f}%" for p in t.by_cpu)
+            "    top CPU: " + ", ".join(f"{p.name}[{p.pid}] {p.cpu_percent:.1f}%" for p in t.by_cpu)
         )
         lines.append(
             "    top MEM: "
-            + ", ".join(
-                f"{p.name or '?'}[{p.pid}] {human_bytes(p.memory_rss_bytes)}" for p in t.by_memory
-            )
+            + ", ".join(f"{p.name}[{p.pid}] {human_bytes(p.memory_rss_bytes)}" for p in t.by_memory)
         )
     for err in s.errors:
         lines.append(f"    ERROR {err}")
