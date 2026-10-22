@@ -622,7 +622,8 @@ if os.name == "nt":
     admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
 s = ProcessSampler(top_n=100000); s.prime(); time.sleep(1.0); t = s.sample()
 out = {"admin": admin, "user": psutil.Process().username(), "stdout": repr(sys.stdout),
-       "procs": [[p.pid, p.name, p.memory_rss_bytes, p.username] for p in t.by_memory]}
+       "procs": [[p.pid, p.name, p.memory_rss_bytes, p.username, p.cpu_percent]
+                 for p in t.by_memory]}
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
     json.dump(out, fh)
 """
@@ -754,7 +755,13 @@ $a = RunAs '"{base}/diag.py" "{base}/user_diag.json"' 'diag'
 $b = RunAs '-m sysmon --once --output-dir "{base}/once"' 'once'
 '{{"diag": ' + $a + ', "once": ' + $b + '}}'
 """
-    res = run(["powershell", "-NoProfile", "-Command", ps], env=ps_env())
+    # An admin-owned busy process: can a standard user still see its CPU use?
+    busy = mp.Process(target=_burn, args=(60.0,), daemon=True)
+    busy.start()
+    try:
+        res = run(["powershell", "-NoProfile", "-Command", ps], env=ps_env())
+    finally:
+        busy.terminate()
     if res.returncode != 0:
         rep.check("run as a standard user", False, res.stderr.strip()[-400:])
         return
@@ -791,6 +798,13 @@ $b = RunAs '-m sysmon --once --output-dir "{base}/once"' 'once'
         "non-admin: every process has a name or label",
         all(p[1] for p in user_view.values()),
         f"{len(user_view)} processes",
+    )
+    seen = user_view.get(busy.pid)
+    expected = 100 / (os.cpu_count() or 1)
+    rep.check(
+        f"non-admin sees an admin process's CPU (~{expected:.0f}% +/-10)",
+        seen is not None and abs(seen[4] - expected) <= 10,
+        f"busy pid {busy.pid} as seen by standard user: {seen}",
     )
     no_user = sum(1 for p in user_view.values() if p[3] is None)
     rep.info(f"non-admin: {no_user}/{len(user_view)} processes hide their owner (expected)")
