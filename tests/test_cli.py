@@ -51,17 +51,31 @@ def test_all_flags_parse():
     assert args.threshold_config == "config/config.yaml"
 
 
-def test_once_writes_host_info(tmp_path, monkeypatch, capsys):
+@pytest.fixture
+def fast(monkeypatch):
+    from sysmon import agent
+
+    monkeypatch.setattr(agent, "WARMUP_SECONDS", 0.0)
+
+
+def test_once_writes_host_info_and_one_snapshot(tmp_path, fast, capsys):
     import json
 
-    from sysmon import cli
-
-    monkeypatch.setattr(cli, "ONCE_SAMPLE_SECONDS", 0.0)
-    assert main(["--once", "--output-dir", str(tmp_path)]) == 0
+    assert main(["--once", "--output-dir", str(tmp_path), "--top-n", "3"]) == 0
     data = json.loads((tmp_path / "host_info.json").read_text(encoding="utf-8"))
     assert {"hostname", "os_name", "architecture", "uptime_seconds"} <= data.keys()
+    lines = (tmp_path / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    snap = json.loads(lines[0])
+    assert snap["cycle"] == 1 and snap["errors"] == []
+    assert len(snap["top_processes"]["by_cpu"]) == 3
     out = capsys.readouterr().out
-    assert "== Host ==" in out and "== Resources ==" in out
+    assert "== Host ==" in out and "== Network ==" in out and "[#1 " in out
+
+
+def test_unused_flags_warn(tmp_path, fast, caplog):
+    main(["--once", "--output-dir", str(tmp_path), "--threshold-config", "x.yaml"])
+    assert "--threshold-config is accepted but not used yet" in caplog.text
 
 
 def test_unwritable_output_dir_exits_3(tmp_path, capsys):
@@ -85,17 +99,44 @@ def test_host_info_write_failure_exits_3_without_traceback(tmp_path, monkeypatch
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(cli, "write_json_atomic", disk_full)
-    monkeypatch.setattr(cli, "ONCE_SAMPLE_SECONDS", 0.0)
     assert main(["--once", "--output-dir", str(tmp_path)]) == 3
     assert "No space left on device" in capsys.readouterr().err
 
 
 def test_ctrl_c_stops_cleanly(tmp_path, monkeypatch, capsys):
-    from sysmon import cli
+    from sysmon.agent import Agent
 
-    def interrupt(_seconds):
+    def interrupt(self, max_cycles=None):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli.time, "sleep", interrupt)
-    assert main(["--once", "--output-dir", str(tmp_path)]) == 0
+    monkeypatch.setattr(Agent, "run", interrupt)
+    assert main(["--output-dir", str(tmp_path)]) == 0
     assert "interrupted" in capsys.readouterr().err
+
+
+def test_continuous_mode_stops_on_signal(tmp_path, fast, monkeypatch, capsys):
+    """Without --once the agent loops until a stop signal arrives."""
+    import signal
+    import threading
+
+    from sysmon import cli
+    from sysmon.agent import Agent
+
+    real_run_cycle = Agent.run_cycle
+
+    def run_cycle_then_signal(self):
+        snap = real_run_cycle(self)
+        if self.cycles == 2:
+            threading.Timer(0.05, signal.raise_signal, (signal.SIGINT,)).start()
+        return snap
+
+    monkeypatch.setattr(Agent, "run_cycle", run_cycle_then_signal)
+
+    class QuickAgent(Agent):  # the CLI only allows 10-30 s; keep the test fast
+        def __init__(self, out_dir, interval, *a, **k):
+            super().__init__(out_dir, 0.2, *a, **k)
+
+    monkeypatch.setattr(cli, "Agent", QuickAgent)
+    assert main(["--output-dir", str(tmp_path), "--interval", "10"]) == 0
+    out = capsys.readouterr().out
+    assert "stopped after 2 cycle(s)" in out

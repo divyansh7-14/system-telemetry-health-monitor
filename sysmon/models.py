@@ -58,10 +58,59 @@ class DiskStats:
 
 
 @dataclass(frozen=True)
-class ResourceStats:
-    cpu: CpuStats
-    memory: MemoryStats
-    disks: list[DiskStats] = field(default_factory=list)
+class ProcessInfo:
+    pid: int
+    name: str | None
+    username: str | None  # None when the OS denies access (e.g. SYSTEM processes)
+    cpu_percent: float  # share of the whole machine, 0-100 (like Task Manager)
+    memory_rss_bytes: int
+    memory_percent: float
+
+
+@dataclass(frozen=True)
+class TopProcesses:
+    by_cpu: list[ProcessInfo] = field(default_factory=list)
+    by_memory: list[ProcessInfo] = field(default_factory=list)
+    total_processes: int = 0
+
+
+@dataclass(frozen=True)
+class InterfaceInfo:
+    name: str
+    mac: str | None  # upper-case, colon separated
+    ipv4: list[str] = field(default_factory=list)
+    ipv6: list[str] = field(default_factory=list)
+    is_up: bool = False
+    is_loopback: bool = False
+    speed_mbps: int | None = None
+    bytes_sent: int | None = None
+    bytes_recv: int | None = None
+
+
+@dataclass(frozen=True)
+class NetworkStats:
+    bytes_sent: int  # all interfaces, since boot
+    bytes_recv: int
+    sent_bps: float | None  # bytes/s since the previous cycle; None on the first cycle
+    recv_bps: float | None
+    primary_interface: str | None  # interface used for the default route
+    primary_ip: str | None
+    interfaces: list[InterfaceInfo] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """Everything collected in one polling cycle (one line of metrics.jsonl)."""
+
+    timestamp: str  # ISO 8601, local time with offset
+    cycle: int
+    duration_ms: int
+    cpu: CpuStats | None
+    memory: MemoryStats | None
+    disks: list[DiskStats] | None
+    network: NetworkStats | None
+    top_processes: TopProcesses | None
+    errors: list[str] = field(default_factory=list)  # collectors that failed this cycle
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

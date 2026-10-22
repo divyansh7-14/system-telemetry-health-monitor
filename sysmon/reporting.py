@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from sysmon.collectors.host import format_uptime
-from sysmon.models import HostInfo, ResourceStats
+from sysmon.models import HostInfo, Snapshot
 
 
 def human_bytes(n: float) -> str:
@@ -42,23 +42,58 @@ def format_host_info(h: HostInfo) -> str:
     )
 
 
-def format_resources(r: ResourceStats) -> str:
-    m = r.memory
-    lines = [
-        "== Resources ==",
-        f"  CPU           : {r.cpu.percent:.1f}%  (per core: "
-        + ", ".join(f"{p:.0f}%" for p in r.cpu.per_core_percent)
-        + ")",
-        f"  Memory        : {human_bytes(m.used_bytes)} used of {human_bytes(m.total_bytes)} "
-        f"({m.percent:.1f}%), {human_bytes(m.available_bytes)} available",
-        f"  Swap          : {m.swap_percent:.1f}% of {human_bytes(m.swap_total_bytes)}",
-    ]
-    if not r.disks:
-        lines.append("  Disks         : none readable")
-    for d in r.disks:
-        lines.append(
-            f"  Disk {d.mountpoint:<9}: {d.used_percent:.1f}% used, "
-            f"{human_bytes(d.free_bytes)} free of {human_bytes(d.total_bytes)} "
-            f"({d.free_percent:.1f}% free)"
+def human_rate(bps: float | None) -> str:
+    return "n/a" if bps is None else f"{human_bytes(bps)}/s"
+
+
+def format_snapshot(s: Snapshot) -> str:
+    """Short console summary of one cycle (ASCII only: safe on any Windows code page)."""
+    time_part = s.timestamp[11:19]
+    parts = []
+    if s.cpu:
+        parts.append(f"CPU {s.cpu.percent:.1f}%")
+    if s.memory:
+        m = s.memory
+        parts.append(
+            f"RAM {m.percent:.1f}% ({human_bytes(m.used_bytes)}/{human_bytes(m.total_bytes)})"
         )
+    if s.disks:
+        parts.append(
+            "Disk " + ", ".join(f"{d.mountpoint} {d.free_percent:.0f}% free" for d in s.disks)
+        )
+    if s.network:
+        n = s.network
+        parts.append(f"Net rx {human_rate(n.recv_bps)} tx {human_rate(n.sent_bps)}")
+    lines = [f"[#{s.cycle} {time_part}] " + " | ".join(parts) + f"  ({s.duration_ms} ms)"]
+    if s.top_processes:
+        t = s.top_processes
+        lines.append(
+            "    top CPU: "
+            + ", ".join(f"{p.name or '?'}[{p.pid}] {p.cpu_percent:.1f}%" for p in t.by_cpu)
+        )
+        lines.append(
+            "    top MEM: "
+            + ", ".join(
+                f"{p.name or '?'}[{p.pid}] {human_bytes(p.memory_rss_bytes)}" for p in t.by_memory
+            )
+        )
+    for err in s.errors:
+        lines.append(f"    ERROR {err}")
+    return "\n".join(lines)
+
+
+def format_network(s: Snapshot) -> str:
+    """Interface table printed once at start-up."""
+    if not s.network:
+        return "== Network ==\n  unavailable"
+    n = s.network
+    lines = [
+        "== Network ==",
+        f"  Primary       : {n.primary_interface or '-'} ({n.primary_ip or 'offline'})",
+    ]
+    for i in n.interfaces:
+        if i.is_loopback or not (i.is_up or i.ipv4):
+            continue
+        ips = ", ".join(i.ipv4 + i.ipv6) or "no IP"
+        lines.append(f"  {i.name[:14]:<14}: {i.mac or 'no MAC'}  {ips}")
     return "\n".join(lines)

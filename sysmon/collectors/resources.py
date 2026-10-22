@@ -15,7 +15,7 @@ from typing import Any
 
 import psutil
 
-from sysmon.models import CpuStats, DiskStats, MemoryStats, ResourceStats
+from sysmon.models import CpuStats, DiskStats, MemoryStats
 
 log = logging.getLogger(__name__)
 
@@ -149,9 +149,3 @@ def collect_disks(already_warned: set[str] | None = None) -> list[DiskStats]:
             )
         )
     return disks
-
-
-def collect_resources(cpu: CpuSampler, disk_warned: set[str] | None = None) -> ResourceStats:
-    return ResourceStats(
-        cpu=cpu.sample(), memory=collect_memory(), disks=collect_disks(disk_warned)
-    )

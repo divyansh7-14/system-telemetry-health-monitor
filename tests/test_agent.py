@@ -1,0 +1,163 @@
+import json
+import signal
+import threading
+import time
+
+import pytest
+
+from sysmon import agent as agent_mod
+from sysmon.agent import Agent, install_stop_handlers
+from sysmon.models import CpuStats, NetworkStats, TopProcesses
+
+
+class FakeClock:
+    """Monotonic clock that only moves when the agent waits (or a collector 'works')."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+@pytest.fixture
+def fake_agent(tmp_path, monkeypatch):
+    """Agent with deterministic collectors and a fake clock; waiting advances the clock."""
+    clock = FakeClock()
+    a = Agent(tmp_path, interval=10, top_n=3, clock=clock)
+    a.waits = []
+    a.work_seconds = 0.0
+
+    def fake_wait(timeout):
+        a.waits.append(round(timeout, 3))
+        clock.now += timeout
+        return a.stop_event.is_set()
+
+    monkeypatch.setattr(a.stop_event, "wait", fake_wait)
+    monkeypatch.setattr(a.cpu, "prime", lambda: None)
+    monkeypatch.setattr(a.processes, "prime", lambda: None)
+
+    def cpu_sample():
+        clock.now += a.work_seconds  # simulate a slow cycle
+        return CpuStats(percent=12.5, per_core_percent=[10.0, 15.0])
+
+    monkeypatch.setattr(a.cpu, "sample", cpu_sample)
+    monkeypatch.setattr(a.processes, "sample", lambda: TopProcesses([], [], 0))
+    monkeypatch.setattr(a.network, "sample", lambda: NetworkStats(1, 2, None, None, None, None, []))
+    monkeypatch.setattr(agent_mod, "collect_memory", lambda: None)
+    monkeypatch.setattr(agent_mod, "collect_disks", lambda warned: [])
+    a.clock_obj = clock
+    return a
+
+
+def read_lines(path):
+    return [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_writes_one_valid_json_line_per_cycle(fake_agent, tmp_path):
+    assert fake_agent.run(max_cycles=3) == 3
+    lines = read_lines(tmp_path / "metrics.jsonl")
+    assert [x["cycle"] for x in lines] == [1, 2, 3]
+    assert lines[0]["cpu"]["percent"] == 12.5
+    assert set(lines[0]) >= {"timestamp", "duration_ms", "memory", "disks", "network", "errors"}
+
+
+def test_schedule_is_drift_free(fake_agent):
+    """Cycles start exactly interval apart even though each cycle takes 3 s."""
+    starts = []
+    real = fake_agent.run_cycle
+
+    def record():
+        starts.append(fake_agent.clock_obj.now)
+        return real()
+
+    fake_agent.run_cycle = record
+    fake_agent.work_seconds = 3.0
+    fake_agent.run(max_cycles=4)
+    gaps = [b - a for a, b in zip(starts, starts[1:], strict=False)]
+    assert gaps == [10.0, 10.0, 10.0]
+
+
+def test_overrun_skips_missed_ticks_instead_of_bursting(fake_agent, caplog):
+    starts = []
+    real = fake_agent.run_cycle
+
+    def record():
+        starts.append(fake_agent.clock_obj.now)
+        fake_agent.work_seconds = 25.0 if len(starts) == 1 else 0.0
+        return real()
+
+    fake_agent.run_cycle = record
+    fake_agent.run(max_cycles=3)
+    first = starts[0]
+    # cycle 1 runs 25 s -> ticks at +10 and +20 are missed, next cycle at +30, then +40
+    assert [s - first for s in starts] == [0.0, 30.0, 40.0]
+    assert "skipping 2 tick(s)" in caplog.text
+
+
+def test_failing_collector_is_recorded_and_others_still_run(fake_agent, tmp_path, monkeypatch):
+    def boom():
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(fake_agent.processes, "sample", boom)
+    fake_agent.run(max_cycles=2)
+    lines = read_lines(tmp_path / "metrics.jsonl")
+    assert len(lines) == 2
+    assert lines[0]["errors"] == ["processes: PermissionError: access denied"]
+    assert lines[0]["top_processes"] is None
+    assert lines[0]["cpu"]["percent"] == 12.5  # other collectors unaffected
+
+
+def test_unwritable_metrics_file_does_not_stop_agent(fake_agent, tmp_path, caplog):
+    (tmp_path / "metrics.jsonl").mkdir()  # a directory where the file should be
+    assert fake_agent.run(max_cycles=3) == 3
+    assert caplog.text.count("cannot write") == 1  # reported once, not every cycle
+
+
+def test_stop_during_wait_ends_loop(fake_agent):
+    real = fake_agent.run_cycle
+
+    def stop_after_second():
+        snap = real()
+        if snap.cycle == 2:
+            fake_agent.stop()
+        return snap
+
+    fake_agent.run_cycle = stop_after_second
+    assert fake_agent.run() == 2
+
+
+def test_stop_during_warmup_runs_no_cycles(fake_agent):
+    fake_agent.stop()
+    assert fake_agent.run() == 0
+
+
+def test_wait_slices_are_short(fake_agent):
+    fake_agent.run(max_cycles=2)
+    assert max(fake_agent.waits) <= agent_mod.WAIT_SLICE
+
+
+def test_real_stop_is_fast(tmp_path, monkeypatch):
+    """Real clock and real Event: stop() from another thread ends a 30 s wait quickly."""
+    monkeypatch.setattr(agent_mod, "WARMUP_SECONDS", 0.0)
+    a = Agent(tmp_path, interval=30, top_n=2)
+    threading.Timer(0.5, a.stop).start()
+    t0 = time.monotonic()
+    assert a.run() == 1
+    assert time.monotonic() - t0 < 2.0
+    snap = read_lines(tmp_path / "metrics.jsonl")[0]
+    assert snap["errors"] == [], snap["errors"]
+
+
+def test_signal_handler_requests_stop_and_restores(tmp_path):
+    a = Agent(tmp_path, interval=10)
+    before = signal.getsignal(signal.SIGINT)
+    restore = install_stop_handlers(a)
+    try:
+        signal.raise_signal(signal.SIGINT)
+        assert a.stop_event.is_set()
+        with pytest.raises(KeyboardInterrupt):  # second Ctrl+C = force quit
+            signal.raise_signal(signal.SIGINT)
+    finally:
+        restore()
+    assert signal.getsignal(signal.SIGINT) is before
