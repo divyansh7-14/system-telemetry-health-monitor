@@ -554,14 +554,23 @@ def phase2(out: Path, rep: Report) -> None:
         )
     else:
         rep.check("interface byte counters present", False, f"{net_ref['iface']} missing")
+    rates = [s["network"]["recv_bps"] or 0 for s in final]
+    received = final[-1]["network"]["bytes_recv"] - final[0]["network"]["bytes_recv"]
+    # Rates must add up to the counters: sum(rate x seconds between cycles) == bytes received.
+    integrated = sum(r * g for r, g in zip(rates[1:], gaps, strict=False))
+    rep.check(
+        "rates x time = bytes received (+/-5%)",
+        within(integrated, received, rel=0.05, absolute=64 * 1024),
+        f"integrated {integrated:.0f} B vs counter delta {received} B",
+    )
     if downloaded:
-        rates = [s["network"]["recv_bps"] or 0 for s in final]
-        received = final[-1]["network"]["bytes_recv"] - final[0]["network"]["bytes_recv"]
+        # A cycle that falls inside the download sees at least half its average speed.
+        needed = 0.5 * downloaded / max(dl_secs, interval)
         rep.check(
             "download visible in totals and rate",
-            received >= downloaded and max(rates) >= downloaded / (2 * interval),
+            received >= downloaded and max(rates) >= needed,
             f"downloaded {downloaded} B in {dl_secs:.1f}s; agent saw +{received} B, "
-            f"peak rx {max(rates):.0f} B/s",
+            f"peak rx {max(rates):.0f} B/s (needed {needed:.0f})",
         )
 
 
