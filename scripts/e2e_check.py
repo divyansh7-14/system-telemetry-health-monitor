@@ -49,14 +49,30 @@ class Report:
         print(f"[INFO] {text}", flush=True)
         self.lines.append(f"[INFO] {text}")
 
+    @staticmethod
+    def _annotate(kind: str, title: str, lines: list[str]) -> None:
+        body = "%0A".join(x.replace("%", "%25").replace("\r", "").replace("\n", " ") for x in lines)
+        print(f"::{kind} title={title}::{body}", flush=True)
+
     def finish(self) -> int:
         osname = f"{platform.system()} {platform.release()} py{platform.python_version()}"
         summary = f"{len(self.lines) - len(self.failures)} ok / {len(self.failures)} failed"
         if IN_CI:
-            # Annotations are readable from the API even when raw logs are not.
-            body = "%0A".join(s.replace("%", "%25") for s in self.lines)
-            kind = "error" if self.failures else "notice"
-            print(f"::{kind} title=e2e {self.phase} on {osname} ({summary})::{body}")
+            # Annotations are readable from the API even when raw logs are not. GitHub
+            # truncates each one at ~4 KB, so failures go first in their own annotation
+            # and the full report is split into chunks.
+            title = f"e2e {self.phase} on {osname} ({summary})"
+            if self.failures:
+                self._annotate("error", title + " FAILURES", self.failures)
+            chunk: list[str] = []
+            part = 1
+            for line in self.lines:
+                if sum(len(x) + 3 for x in chunk) + len(line) > 2800:
+                    self._annotate("notice", f"{title} part {part}", chunk)
+                    chunk, part = [], part + 1
+                chunk.append(line)
+            if chunk:
+                self._annotate("notice", f"{title} part {part}", chunk)
         print(f"\n{self.phase}: {summary}")
         return 1 if self.failures else 0
 
