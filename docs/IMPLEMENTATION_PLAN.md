@@ -24,7 +24,7 @@ start the next phase.
 | Phase | Scope | Target |
 |---|---|---|
 | 0 | Skeleton, packaging, CI | ✅ done |
-| 1 | Host discovery + baseline CPU/RAM/disk | ✅ done — verified 22 Oct on Windows Server 2025 + Linux (30 unit tests, 15 e2e checks) |
+| 1 | Host discovery + baseline CPU/RAM/disk | ✅ done — re-reviewed 22 Oct, verified on Windows Server 2025 + Linux, Py 3.10/3.12/3.14 (35 unit tests, 21 e2e checks) |
 | 2 | Polling loop, top processes, network, `metrics.jsonl` | Thu 22 – Fri 23 Oct |
 | 3 | Config loader, rules engine, statuses, `alerts.log` | Sat 24 Oct |
 | 4 | Log rotation, graceful shutdown, error handling, lock file | Sun 25 Oct |
@@ -41,12 +41,21 @@ Built: `collectors/host.py`, `collectors/resources.py` (with `CpuSampler` primin
 `reporting.py`, full CLI flag set with range validation, `--once`, writable-output-dir check (exit 3).
 
 Verify (all passed 22 Oct):
-- [x] `ruff check .` clean, `pytest` 30/30 on Windows + Linux, Py 3.10 + 3.12
-- [x] e2e on real Windows: OS name/build, RAM, physical + logical cores, uptime, C: total/free all match CIM; CPU reads 100% with every core busy
+- [x] `ruff check .` clean, `pytest` 35/35 on Windows + Linux, Py 3.10 + 3.12 + 3.14
+- [x] e2e on real Windows (21 checks): OS name/build, RAM, memory %, page file, physical + logical cores, uptime, every fixed drive, C: total/free all match CIM; CPU reads 100% with every core busy; exit codes 2 and 3 correct
+- [x] `pip install .` works and the `sysmon` command runs (tested in CI)
 - [x] e2e found and fixed a real bug: Windows Server 2025 was reported as "Windows 11" (Py 3.10) / "2025Server" (Py 3.12)
 - [x] `python -m sysmon --once` prints host + resources and writes `host_info.json`
 - [x] Disk filter skips CD-ROM / squashfs / unreadable drives, logs each once
 - [x] Windows 10 / 11 / Server named correctly from build + product type
+
+Re-review 22 Oct (evening) — fixed:
+- Exit code 2 was used for both bad flags and an unwritable output dir → output errors now 3 (config 4, lock 5)
+- Disk-full / locked `host_info.json` crashed with a traceback → clear message, exit 3
+- Ctrl+C during `--once` printed a traceback → clean stop, exit 0
+- Windows load average (psutil emulation) is zeros for the first ~5 s → reported as None until warmed up
+- Type hint pointed at `psutil._common.sdiskpart`, removed in psutil 7
+- `pyproject.toml`: deprecated license table → SPDX string; version defined once (`sysmon.__version__`)
 
 ---
 
