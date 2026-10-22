@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -14,10 +15,14 @@ jobs:
         python-version: ["3.10", "3.12"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -r requirements-dev.txt
       - run: ruff check .
       - run: pytest -q
+      # Runs the real agent on this machine and cross-checks it with OS tools
+      # (PowerShell/CIM on Windows, /proc and df on Linux).
+      - name: End-to-end checks
+        run: python scripts/e2e_check.py all
