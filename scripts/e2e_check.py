@@ -724,23 +724,34 @@ def robustness(out: Path, rep: Report) -> None:
     base.mkdir(exist_ok=True)
     run(["icacls", str(base), "/grant", "Users:(OI)(CI)M", "/T", "/Q"])
     (base / "diag.py").write_text(DIAG, encoding="utf-8")
+    # Pure .NET + net.exe: no PowerShell modules needed (they fail to autoload on CI).
     ps = f"""
-$ErrorActionPreference = 'Stop'
-$pw = ConvertTo-SecureString '{NONADMIN_PASS}' -AsPlainText -Force
-if (-not (Get-LocalUser -Name '{NONADMIN_USER}' -ErrorAction SilentlyContinue)) {{
-  New-LocalUser -Name '{NONADMIN_USER}' -Password $pw -AccountNeverExpires | Out-Null
-  Add-LocalGroupMember -Group 'Users' -Member '{NONADMIN_USER}'
-}}
-$cred = New-Object System.Management.Automation.PSCredential('{NONADMIN_USER}', $pw)
-function RunAs($argList, $tag) {{
-  $p = Start-Process -FilePath '{sys.executable}' -ArgumentList $argList -Credential $cred `
-       -WorkingDirectory '{base}' -Wait -PassThru -NoNewWindow `
-       -RedirectStandardOutput '{base}\\$tag.out' -RedirectStandardError '{base}\\$tag.err'
+net user {NONADMIN_USER} '{NONADMIN_PASS}' /add /expires:never 2>&1 | Out-Null
+$pw = New-Object System.Security.SecureString
+foreach ($c in '{NONADMIN_PASS}'.ToCharArray()) {{ $pw.AppendChar($c) }}
+function RunAs([string]$argStr, [string]$tag) {{
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = '{sys.executable}'
+  $psi.Arguments = $argStr
+  $psi.UserName = '{NONADMIN_USER}'
+  $psi.Domain = $env:COMPUTERNAME
+  $psi.Password = $pw
+  $psi.LoadUserProfile = $true
+  $psi.UseShellExecute = $false
+  $psi.WorkingDirectory = '{base}'
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $p = [System.Diagnostics.Process]::Start($psi)
+  $out = $p.StandardOutput.ReadToEndAsync()
+  $err = $p.StandardError.ReadToEnd()
+  $p.WaitForExit()
+  [IO.File]::WriteAllText('{base}/' + $tag + '.err', $err)
+  [IO.File]::WriteAllText('{base}/' + $tag + '.out', $out.Result)
   return $p.ExitCode
 }}
-$a = RunAs @('"{base}\\diag.py"', '"{base}\\user_diag.json"') 'diag'
-$b = RunAs @('-m', 'sysmon', '--once', '--output-dir', '"{base}\\once"') 'once'
-@{{diag = $a; once = $b}} | ConvertTo-Json
+$a = RunAs '"{base}/diag.py" "{base}/user_diag.json"' 'diag'
+$b = RunAs '-m sysmon --once --output-dir "{base}/once"' 'once'
+'{{"diag": ' + $a + ', "once": ' + $b + '}}'
 """
     res = run(["powershell", "-NoProfile", "-Command", ps], env=ps_env())
     if res.returncode != 0:
