@@ -6,7 +6,7 @@
 | Deadline | **28 Oct 2026** — completed code, README with setup/run instructions, sample outputs |
 | Language | Python 3.10+ |
 | Primary demo OS | Windows 10/11 (CI also runs on Ubuntu) |
-| Status | Phase 0 and Phase 1 done — see [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) |
+| Status | Phases 0, 1 and 2 done — see [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) |
 
 ## 1. Problem
 
@@ -35,7 +35,7 @@ in a config file, and writes structured reports and alerts so a problem is visib
 | Brief item | Requirement IDs | Phase |
 |---|---|---|
 | 1. Host discovery & static metrics | FR-1, FR-2 | 1 ✅ |
-| 2. Continuous polling & process inspection | FR-3, FR-4, FR-5, FR-6 | 2 |
+| 2. Continuous polling & process inspection | FR-3, FR-4, FR-5, FR-6 | 2 ✅ |
 | 3. Health rules & alert engine | FR-7 … FR-11 | 3 |
 | 4. CLI flags & log management, error handling | FR-12 … FR-16 | 1 (CLI) ✅ / 4 |
 | Deliverables: README, sample outputs, regular commits | FR-17, FR-18 | 5 |
@@ -47,9 +47,9 @@ in a config file, and writes structured reports and alerts so a problem is visib
 - **FR-2** Collect baseline stats: CPU % (overall + per core), RAM total/used/available/%, swap, and used/free % for every readable local disk. Optical drives, read-only and virtual mounts are skipped; unreadable drives are logged once.
 
 ### Polling & process inspection (Phase 2)
-- **FR-3** Run a timed loop at the configured interval (10–30 s, default 15). Scheduling is drift-free (based on a monotonic clock) and the wait is interruptible so Ctrl+C takes effect immediately.
-- **FR-4** Each cycle captures the **top N** processes by CPU and by memory (default N = 5): pid, name, user, CPU %, RSS memory, memory %. Per-process CPU is measured over the whole interval (primed the previous cycle, never the bogus first-call 0.0) and normalised by core count so it matches Task Manager. The Windows "System Idle Process" (pid 0) is excluded. Processes that vanish or deny access are skipped silently.
-- **FR-5** Each cycle records network details: per interface IPv4, IPv6, MAC address, up/down; totals of bytes sent/received since boot; and send/receive rates (bytes/s) computed from the previous cycle.
+- **FR-3** Run a timed loop at the configured interval (10–30 s, default 15). Scheduling is drift-free (based on a monotonic clock) and the wait is interruptible so Ctrl+C takes effect immediately. A cycle that overruns skips the missed ticks instead of running them back to back.
+- **FR-4** Each cycle captures the **top N** processes by CPU and by memory (default N = 5): pid, name, user, CPU %, RSS memory, memory %. Per-process CPU is measured over the whole interval (primed the previous cycle, never the bogus first-call 0.0) and normalised by core count so it matches Task Manager. The Windows "System Idle Process" (pid 0) is excluded. Processes that vanish or deny access never cause an error; fields the OS refuses are null, and Windows kernel processes whose name is unreadable (Memory Compression, Registry, Secure System) are labelled `[protected system process]`.
+- **FR-5** Each cycle records network details: per interface IPv4, IPv6, MAC address, up/down, speed and bytes sent/received; the primary (default-route) interface and IP; totals of bytes sent/received since boot and send/receive rates (bytes/s). Totals and rates are counted on the default-route interface so traffic mirrored on virtual adapters (Hyper-V/WSL vEthernet, Azure VF) is not counted twice; loopback is never counted. A rate is null on the first cycle, after a counter reset, or when the counted interface changes.
 - **FR-6** Each cycle appends one JSON object to `metrics.jsonl` (schema in §7) and prints a short console summary.
 
 ### Rules & alerts (Phase 3)
@@ -110,7 +110,9 @@ The same keys work in `config.json`. Unknown keys produce a warning (catches typ
  "status": "WARNING",
  "checks": [{"rule": "cpu_max", "target": "cpu", "value": 81.2, "status": "WARNING"}],
  "cpu": {...}, "memory": {...}, "disks": [...],
- "network": {"bytes_sent": 0, "bytes_recv": 0, "sent_bps": 0.0, "recv_bps": 0.0, "interfaces": [...]},
+ "network": {"bytes_sent": 0, "bytes_recv": 0, "sent_bps": 0.0, "recv_bps": 0.0,
+             "counted_interface": "Wi-Fi", "primary_interface": "Wi-Fi", "primary_ip": "192.168.1.20",
+             "interfaces": [...]},
  "top_processes": {"by_cpu": [...], "by_memory": [...]},
  "errors": []}
 ```
@@ -156,7 +158,9 @@ Data flow per cycle: **collectors → `Snapshot` → rules → `Checks` → writ
 | `RotatingFileHandler` rollover fails on Windows if another handle has the file open (*WinError 32*) | One writer per file, single-instance lock, `delay=True`; rollover errors reported via `handleError`, not raised |
 | Windows has no real SIGTERM from outside; Ctrl+C is SIGINT, Ctrl+Break is SIGBREAK | Handle SIGINT + SIGBREAK on Windows, SIGINT + SIGTERM on Linux; sleep with `Event.wait()` |
 | A value hovering at the limit makes alerts flap | Consecutive-breach count + recovery margin (hysteresis) |
-| Network counters can wrap or reset (adapter restart) | psutil `nowrap=True` (default); a negative delta resets the rate to 0 for that cycle |
+| Network counters can wrap or reset (adapter restart) | psutil `nowrap=True` (default); a negative delta gives a null rate for that cycle |
+| Summing all adapters double-counts mirrored traffic (found in CI: 18.9 MB download reported as 38.8 MB) | Totals/rates counted on the default-route interface only |
+| Some Windows kernel processes have no readable name (found in CI: PID 92) | Labelled `[protected system process]` |
 
 ## 10. Success criteria (definition of done)
 

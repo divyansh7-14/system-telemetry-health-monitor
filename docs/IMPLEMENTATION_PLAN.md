@@ -25,7 +25,7 @@ start the next phase.
 |---|---|---|
 | 0 | Skeleton, packaging, CI | ✅ done |
 | 1 | Host discovery + baseline CPU/RAM/disk | ✅ done — re-reviewed 22 Oct, verified on Windows Server 2025 + Linux, Py 3.10/3.12/3.14 (35 unit tests, 21 e2e checks) |
-| 2 | Polling loop, top processes, network, `metrics.jsonl` | Thu 22 – Fri 23 Oct |
+| 2 | Polling loop, top processes, network, `metrics.jsonl` | ✅ done 22 Oct — verified on Windows + Linux (68 unit tests, 43 e2e checks on Windows) |
 | 3 | Config loader, rules engine, statuses, `alerts.log` | Sat 24 Oct |
 | 4 | Log rotation, graceful shutdown, error handling, lock file | Sun 25 Oct |
 | 5 | Windows demo, `samples/`, full README, `v1.0.0` tag | Mon 26 – Tue 27 Oct |
@@ -59,38 +59,39 @@ Re-review 22 Oct (evening) — fixed:
 
 ---
 
-## Phase 2 — Continuous polling & process inspection  *(Brief task 2)*
+## Phase 2 — Continuous polling & process inspection ✅  *(Brief task 2)*
 
-**Build**
-1. `collectors/processes.py`
-   - `ProcessSampler` using `psutil.process_iter(["pid","name","username","memory_info","memory_percent"], ad_value=None)`; psutil caches `Process` objects between calls so `cpu_percent()` measures the whole interval.
-   - First cycle primes every process; values from the priming call are discarded.
-   - Normalise CPU by logical core count; skip pid 0 / "System Idle Process"; `username=None` when access is denied.
-   - Return `top_by_cpu` and `top_by_memory` (N each).
-2. `collectors/network.py`
-   - `net_if_addrs()` → per interface IPv4, IPv6, MAC (`psutil.AF_LINK`), `net_if_stats()` → up/down.
-   - `NetworkSampler` keeps the previous `net_io_counters()` + timestamp to compute `sent_bps` / `recv_bps`; negative delta (counter reset) → rate 0.
-   - Loopback and down interfaces kept but flagged, so IP/MAC of the real adapter is easy to find.
-3. `models.py`: `ProcessInfo`, `InterfaceInfo`, `NetworkStats`, `Snapshot`.
-4. `agent.py`: `Agent.run()` loop
-   - `next_tick = monotonic() + interval`; `stop_event.wait(timeout=next_tick - monotonic())`.
-   - If a cycle overruns, log a warning and schedule from now (no burst of catch-up cycles).
-   - Each collector wrapped in try/except → error string into `snapshot.errors`, other collectors still run.
-   - Appends one JSON line per cycle to `metrics.jsonl` (plain file append in this phase; rotation added in Phase 4) and prints a 3-line console summary.
-5. `cli.py`: without `--once`, start the loop; Ctrl+C stops it cleanly (full signal work in Phase 4).
+Built:
+1. `collectors/processes.py` — `ProcessSampler`: one `process_iter` pass per cycle (psutil caches a
+   Process object per PID, so per-process CPU covers the whole interval); CPU normalised to the whole
+   machine; PID 0 skipped; AccessDenied / NoSuchProcess never raise; `username()` (slow on Windows)
+   only fetched for the top lists; unreadable Windows kernel process names labelled.
+2. `collectors/network.py` — `NetworkSampler`: per-interface IPv4/IPv6/MAC/up/speed/bytes; primary
+   interface found via the default route (UDP connect, no packets sent); totals and rates counted
+   on that interface; rate is None on first cycle, counter reset, or interface change.
+3. `agent.py` — `Agent.run()`: monotonic tick grid (drift-free), overrun skips missed ticks,
+   0.25 s wait slices, per-collector try/except into `errors`, one JSON line per cycle to
+   `metrics.jsonl` (file opened per write, write failures logged once and never fatal),
+   Ctrl+C / Ctrl+Break / SIGTERM handlers set a stop event (second Ctrl+C forces exit).
+   *Signal handling was pulled forward from Phase 4 so the Phase 2 stop check is meaningful on Windows.*
+4. CLI — continuous mode, `--once` = one full snapshot, `--interval` / `--top-n` wired, console
+   summary per cycle (ASCII only, never crashes on unusual characters), not-yet-used flags warn.
 
-**Tests**
-- Fake `process_iter` with a vanishing process, an access-denied process, pid 0 → only valid ones ranked, correct order, N respected.
-- CPU normalisation (200 % on 2 cores → 100 %); first cycle priming.
-- Network rate maths, counter reset, MAC extraction from a fake `AF_LINK` entry.
-- Loop: injected fake clock + collectors, `max_cycles=3` → 3 JSON lines, valid JSON, cycle numbers 1–3; a raising collector → `errors` populated, loop continues.
+Tests: 68 unit tests (processes 8, network 13, agent 10, CLI 14, plus Phase 1).
 
-**Verify**
-- [ ] ruff clean, all tests pass locally and on CI (Windows + Ubuntu)
-- [ ] e2e: agent runs ≥ 3 cycles on Windows + Linux; `metrics.jsonl` has one valid line per cycle
-- [ ] e2e: a known busy-loop PID is #1 by CPU at ~100/cores %; a known memory-hog PID is #1 by memory
-- [ ] e2e: IP and MAC match `Get-NetIPAddress` / `Get-NetAdapter` (Windows) and `ip -j addr` (Linux); receive rate rises during a download
-- [ ] e2e: interrupting the agent (CTRL_C / SIGINT) stops it within 1 s, exit 0, no traceback
+Verify (all passed 22 Oct, CI run on commit `89d5cfa`, 6/6 jobs):
+- [x] ruff clean, all tests pass on Windows + Ubuntu, Py 3.10 / 3.12 / 3.14
+- [x] e2e: ≥ 4 cycles, consecutive cycle numbers, exactly 10 s apart, no collector errors, each cycle < 30 ms
+- [x] e2e: busy-loop PID is #1 by CPU every cycle at 24.9 % (= 100 / 4 cores); 1 GiB memory hog is #1 by memory, RSS within 10 %
+- [x] e2e: primary interface, IPv4, MAC, every IPv4 address and per-interface byte counters match `Get-NetRoute` / `Get-NetIPAddress` / `Get-NetAdapter(Statistics)` (Windows) and `ip -j` / `/sys/class/net` (Linux) exactly
+- [x] e2e: an 18.9 MB download appears once in the totals and in the rate; rates × time equal the counter change within 0.01 %
+- [x] e2e: Ctrl+Break (Windows) / Ctrl+C (Linux) stops within 0.25 s, exit 0, no traceback; SIGINT path also unit-tested on Windows
+- [x] e2e: every running process has a name or label
+- [x] Agent overhead: ~1 % of one core, 27–34 MB RAM on Windows (NFR-1)
+
+Found and fixed by the Windows/Linux runs:
+- Windows kernel process (PID 92, Memory Compression / Registry / Secure System) has an empty name → labelled
+- Totals summed all adapters → mirrored traffic counted twice (18.9 MB showed as 38.8 MB) → counted on default-route interface
 
 ---
 
@@ -167,9 +168,9 @@ Re-review 22 Oct (evening) — fixed:
 | ID | Phase | Status |
 |---|---|---|
 | FR-1, FR-2 | 1 | ✅ |
-| FR-3 … FR-6 | 2 | ☐ |
+| FR-3 … FR-6 | 2 | ✅ |
 | FR-7 … FR-11 | 3 | ☐ |
-| FR-12 | 1 (flags) / 3 (precedence) | ◐ |
+| FR-12 | 1 (flags) / 2 (`--interval`, `--top-n`, `--once`) / 3 (precedence) | ◐ |
 | FR-13 … FR-16 | 4 | ☐ |
 | FR-17, FR-18 | 5 | ☐ |
 | NFR-1 … NFR-5 | checked in every phase | ◐ |
