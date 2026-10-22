@@ -12,14 +12,31 @@ import psutil
 
 from sysmon.models import HostInfo
 
+# Server releases share build numbers with desktop Windows, so the year comes from the build.
+_SERVER_BUILDS = {14393: "2016", 17763: "2019", 20348: "2022", 26100: "2025"}
+_VER_NT_WORKSTATION = 1
+
 
 def _windows_name(release: str) -> str:
-    """Windows 11 still reports release '10' on older Pythons; use the build number."""
+    """Friendly Windows release: '10', '11', or 'Server 2022' etc.
+
+    Older Pythons report Windows 11 as release '10', and different Python versions
+    report Server as '10' or '2025Server', so the build number and product type
+    (workstation vs server) decide instead.
+    """
     try:
-        build = sys.getwindowsversion().build  # type: ignore[attr-defined]
+        ver = sys.getwindowsversion()  # type: ignore[attr-defined]
     except AttributeError:
         return release
-    return "11" if release == "10" and build >= 22000 else release
+    build = ver.build
+    if getattr(ver, "product_type", _VER_NT_WORKSTATION) != _VER_NT_WORKSTATION:
+        if release.endswith("Server"):
+            return f"Server {release.removesuffix('Server')}"
+        year = _SERVER_BUILDS.get(build)
+        return f"Server {year}" if year else f"Server (build {build})"
+    if release in ("10", "11"):
+        return "11" if build >= 22000 else "10"
+    return release
 
 
 def collect_host_info(now: float | None = None) -> HostInfo:

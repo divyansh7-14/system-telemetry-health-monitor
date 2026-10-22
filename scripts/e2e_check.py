@@ -150,12 +150,7 @@ def phase1(out: Path, rep: Report) -> None:
 
     if IS_WINDOWS:
         caption = ref["caption"]
-        if "Server" in caption:
-            ok = "Server" in host["os_release"] and any(
-                y in caption for y in host["os_release"].split() if y.isdigit()
-            )
-        else:
-            ok = f"Windows {host['os_release']}" in caption
+        ok = f"Windows {host['os_release']}" in caption
         rep.check("OS name matches CIM caption", ok, f"'{host['os_release']}' vs '{caption}'")
         rep.check(
             "OS build matches CIM",
@@ -186,7 +181,7 @@ def phase1(out: Path, rep: Report) -> None:
             f"{host['cpu_physical_cores']} vs {ref['physical']}",
         )
     rep.check(
-        "uptime matches (±120 s)",
+        "uptime matches (+/-120 s)",
         within(host["uptime_seconds"], ref["uptime"], absolute=120),
         f"{host['uptime_seconds']} vs {ref['uptime']}",
     )
@@ -199,12 +194,12 @@ def phase1(out: Path, rep: Report) -> None:
     rep.check("system drive reported", d is not None, f"mounts={list(disks)}")
     if d:
         rep.check(
-            "disk total matches (±1%)",
+            "disk total matches (+/-1%)",
             within(d.total_bytes, ref["disk_total"], rel=0.01),
             f"{d.total_bytes} vs {ref['disk_total']}",
         )
         rep.check(
-            "disk free matches (±2%)",
+            "disk free matches (+/-2%)",
             within(d.free_bytes, ref["disk_free"], rel=0.02),
             f"{d.free_bytes} vs {ref['disk_free']}",
         )
