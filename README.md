@@ -9,8 +9,8 @@ Cross-platform Python agent that monitors CPU, RAM, disk, network and processes,
 Requires Python 3.10+.
 
 ```bash
-git clone https://github.com/divyansh7-14/sysmon-agent.git
-cd sysmon-agent
+git clone https://github.com/divyansh7-14/system-telemetry-health-monitor.git
+cd system-telemetry-health-monitor
 python -m venv .venv
 # Windows:      .venv\Scripts\activate
 # Linux/macOS:  source .venv/bin/activate
