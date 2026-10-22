@@ -186,6 +186,66 @@ def phase1(out: Path, rep: Report) -> None:
         f"{host['uptime_seconds']} vs {ref['uptime']}",
     )
 
+    # Memory: used % vs the OS's own free-memory figure (both read within ~1 s).
+    from sysmon.collectors.resources import collect_memory
+
+    mem = collect_memory()
+    if IS_WINDOWS:
+        m = powershell_json(
+            "Get-CimInstance Win32_OperatingSystem | "
+            "Select-Object TotalVisibleMemorySize, FreePhysicalMemory"
+        )
+        ref_pct = 100 * (1 - int(m["FreePhysicalMemory"]) / int(m["TotalVisibleMemorySize"]))
+    else:
+        info = {
+            ln.split(":")[0]: int(ln.split()[1])
+            for ln in Path("/proc/meminfo").read_text().splitlines()
+            if ln
+        }
+        ref_pct = 100 * (1 - info["MemAvailable"] / info["MemTotal"])
+    rep.check(
+        "memory used % matches OS (+/-5 pts)",
+        within(mem.percent, ref_pct, absolute=5),
+        f"{mem.percent} vs {ref_pct:.1f}",
+    )
+
+    if IS_WINDOWS:
+        # Swap = page file on Windows.
+        pf = powershell_json(
+            "@(Get-CimInstance Win32_PageFileUsage | Select-Object AllocatedBaseSize, CurrentUsage)"
+        )
+        pf = pf if isinstance(pf, list) else [pf]
+        pf_total = sum(int(p["AllocatedBaseSize"]) for p in pf) * 1024**2
+        pf_used = sum(int(p["CurrentUsage"]) for p in pf) * 1024**2
+        rep.info(
+            f"swap: agent total={mem.swap_total_bytes} used={mem.swap_used_bytes} "
+            f"({mem.swap_percent}%) | CIM pagefile total={pf_total} used={pf_used}"
+        )
+        # Load average is emulated on Windows; see what a fresh process gets.
+        la = run(
+            [
+                sys.executable,
+                "-c",
+                "import psutil,time;a=psutil.getloadavg();time.sleep(6);"
+                "print(a, psutil.getloadavg())",
+            ]
+        )
+        rep.info(f"getloadavg first call / after 6 s in a fresh process: {la.stdout.strip()}")
+        # Every fixed drive Windows knows about must be reported.
+        fixed = powershell_json(
+            "@(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | "
+            "Select-Object -ExpandProperty DeviceID)"
+        )
+        fixed = fixed if isinstance(fixed, list) else [fixed]
+        from sysmon.collectors.resources import collect_disks as _cd
+
+        agent_drives = sorted(d.mountpoint.rstrip("\\") for d in _cd())
+        rep.check(
+            "all fixed drives reported",
+            sorted(fixed) == agent_drives,
+            f"agent={agent_drives} CIM={sorted(fixed)}",
+        )
+
     # Disk: the agent's reading of the system drive vs CIM (Windows) or df (Linux).
     from sysmon.collectors.resources import collect_disks
 
