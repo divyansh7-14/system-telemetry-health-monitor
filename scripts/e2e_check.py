@@ -81,8 +81,19 @@ def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=120, **kw)
 
 
+def ps_env() -> dict:
+    """Environment for Windows PowerShell 5.1. When launched from PowerShell 7 (the CI
+    default shell) the inherited PSModulePath points 5.1 at modules it cannot load."""
+    env = dict(os.environ)
+    env.pop("PSModulePath", None)
+    return env
+
+
 def powershell_json(command: str):
-    res = run(["powershell", "-NoProfile", "-Command", f"{command} | ConvertTo-Json -Depth 3"])
+    res = run(
+        ["powershell", "-NoProfile", "-Command", f"{command} | ConvertTo-Json -Depth 3"],
+        env=ps_env(),
+    )
     if res.returncode != 0:
         raise RuntimeError(res.stderr.strip())
     return json.loads(res.stdout)
@@ -668,16 +679,27 @@ def robustness(out: Path, rep: Report) -> None:
 
     # --- pythonw: no console at all (how a background agent runs on Windows)
     pyw = str(Path(sys.executable).with_name("pythonw.exe"))
+    # Like Task Scheduler / a shortcut: no console and no inherited stdout/stderr.
+    detached = {
+        "creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        "close_fds": True,
+    }
     diag_py = d / "diag.py"
     diag_py.write_text(DIAG, encoding="utf-8")
-    run([pyw, str(diag_py), str(d / "pyw_diag.json")])
+    subprocess.run([pyw, str(diag_py), str(d / "pyw_diag.json")], timeout=120, **detached)
     try:
         pyw_stdout = json.loads((d / "pyw_diag.json").read_text(encoding="utf-8"))["stdout"]
     except (OSError, ValueError):
         pyw_stdout = "diag failed"
-    rep.info(f"under pythonw sys.stdout is {pyw_stdout}")
+    rep.check(
+        "background launch really has no console (sys.stdout is None)",
+        pyw_stdout == "None",
+        f"sys.stdout under detached pythonw: {pyw_stdout}",
+    )
     pw = d / "pythonw_once"
-    res = subprocess.run([pyw, "-m", "sysmon", "--once", "--output-dir", str(pw)], timeout=120)
+    res = subprocess.run(
+        [pyw, "-m", "sysmon", "--once", "--output-dir", str(pw)], timeout=120, **detached
+    )
     lines = _read_snapshots(pw / "metrics.jsonl")
     rep.check(
         "pythonw (no console) --once: exit 0, one clean snapshot",
@@ -685,7 +707,9 @@ def robustness(out: Path, rep: Report) -> None:
         f"exit={res.returncode} lines={len(lines)}",
     )
     pwc = d / "pythonw_loop"
-    bg = subprocess.Popen([pyw, "-m", "sysmon", "--interval", "10", "--output-dir", str(pwc)])
+    bg = subprocess.Popen(
+        [pyw, "-m", "sysmon", "--interval", "10", "--output-dir", str(pwc)], **detached
+    )
     bg_snaps = _wait_cycles(pwc / "metrics.jsonl", 2, 30)
     alive = bg.poll() is None
     bg.kill()
@@ -718,7 +742,7 @@ $a = RunAs @('"{base}\\diag.py"', '"{base}\\user_diag.json"') 'diag'
 $b = RunAs @('-m', 'sysmon', '--once', '--output-dir', '"{base}\\once"') 'once'
 @{{diag = $a; once = $b}} | ConvertTo-Json
 """
-    res = run(["powershell", "-NoProfile", "-Command", ps])
+    res = run(["powershell", "-NoProfile", "-Command", ps], env=ps_env())
     if res.returncode != 0:
         rep.check("run as a standard user", False, res.stderr.strip()[-400:])
         return
