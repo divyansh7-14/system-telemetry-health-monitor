@@ -138,6 +138,16 @@ def phase1(out: Path, rep: Report) -> None:
         rep.info(res.stderr[-500:])
         return
     console = res.stdout
+    bad = run([sys.executable, "-m", "sysmon", "--interval", "5"])
+    rep.check("bad flag -> exit 2 (usage)", bad.returncode == 2, f"exit={bad.returncode}")
+    blocker = out / "not_a_dir"
+    blocker.write_text("x", encoding="utf-8")
+    unw = run([sys.executable, "-m", "sysmon", "--once", "--output-dir", str(blocker / "sub")])
+    rep.check(
+        "unwritable output dir -> exit 3, no traceback",
+        unw.returncode == 3 and "Traceback" not in unw.stderr,
+        f"exit={unw.returncode} stderr={unw.stderr.strip()[:120]}",
+    )
     rep.check(
         "console sections",
         "== Host ==" in console and "== Resources ==" in console,

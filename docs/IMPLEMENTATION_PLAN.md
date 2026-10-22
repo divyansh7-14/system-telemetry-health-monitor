@@ -38,7 +38,7 @@ Package layout, `pyproject.toml`, requirements, ruff/pytest config, CI matrix, M
 
 ## Phase 1 — Host discovery & baseline stats ✅  *(Brief task 1)*
 Built: `collectors/host.py`, `collectors/resources.py` (with `CpuSampler` priming), `models.py`,
-`reporting.py`, full CLI flag set with range validation, `--once`, writable-output-dir check (exit 2).
+`reporting.py`, full CLI flag set with range validation, `--once`, writable-output-dir check (exit 3).
 
 Verify (all passed 22 Oct):
 - [x] `ruff check .` clean, `pytest` 30/30 on Windows + Linux, Py 3.10 + 3.12
@@ -92,7 +92,7 @@ Verify (all passed 22 Oct):
    - `load_config(path)`: `.yaml/.yml` → `yaml.safe_load`, `.json` → `json.load`, other → error.
    - Validate: numbers in 0–100, `warning` must be "less severe" than `critical` (below it for `*_max`, above it for `*_min_free`), interval 10–30, unknown keys → warning.
    - Bare number → critical only. Merge: defaults ← file ← CLI flags.
-   - `ConfigError` → message on stderr, exit 3.
+   - `ConfigError` → message on stderr, exit 4.
 2. `config/config.yaml` with the defaults from PRD §7, plus `config/config.example.json`.
 3. `rules.py`
    - `evaluate(snapshot, thresholds) -> list[Check]` — pure function; `disk_min_free` makes one check per disk, process rules one check per offending process.
@@ -109,7 +109,7 @@ Verify (all passed 22 Oct):
 **Verify**
 - [ ] ruff + tests + CI green
 - [ ] e2e: with a test config and a CPU burn, `alerts.log` gets OK→WARNING→CRITICAL then a recovery line after the burn stops
-- [ ] e2e: broken configs (typo, `critical < warning`, bad YAML, bad JSON) → one clear sentence and exit 3
+- [ ] e2e: broken configs (typo, `critical < warning`, bad YAML, bad JSON) → one clear sentence and exit 4
 - [ ] e2e: no config file → runs on defaults and says so in `agent.log`
 
 ---
@@ -120,22 +120,22 @@ Verify (all passed 22 Oct):
 1. `logs.py`
    - `RotatingFileHandler(maxBytes=max_log_mb*1MB, backupCount, encoding="utf-8", delay=True)` for `agent.log`, `alerts.log`, `metrics.jsonl` (metrics via a dedicated logger with a bare `%(message)s` formatter).
    - Override `handleError` so a failed rollover (Windows *WinError 32*) or full disk is reported once to stderr/agent.log and the agent keeps running.
-   - Single-instance lock: `sysmon.lock` holding the PID, created with `O_EXCL`; stale lock (PID not running) is replaced; live lock → exit 4.
+   - Single-instance lock: `sysmon.lock` holding the PID, created with `O_EXCL`; stale lock (PID not running) is replaced; live lock → exit 5.
 2. Signals: SIGINT always; SIGBREAK on Windows; SIGTERM on Linux. Handler only sets `stop_event`. `finally:` writes "agent stopped after N cycles", closes handlers, removes the lock.
 3. Error audit: wrap `main()` so an unexpected exception is logged with traceback to `agent.log` and exits 1; permission errors on disks/processes stay quiet-but-logged-once.
 
 **Tests**
 - Rotation: tiny `max_log_mb` → backup files appear, count never exceeds `backup_count + 1`.
-- Lock file: second agent → exit 4; stale lock is taken over.
+- Lock file: second agent → exit 5; stale lock is taken over.
 - Shutdown: setting the stop event mid-wait ends the loop and closes files; handler raising during write doesn't crash the loop.
-- Exit codes 0/1/2/3/4 each covered.
+- Exit codes 0/1/2/3/4/5 each covered.
 
 **Verify**
 - [ ] ruff + tests + CI green
 - [ ] e2e: tiny `--max-log-mb` → `.1 .2 .3` backups appear, never more
 - [ ] e2e: CTRL_BREAK_EVENT (Windows) / SIGTERM (Linux) and Ctrl+C all stop cleanly with the final log line; lock file removed
-- [ ] e2e: a second agent on the same `--output-dir` exits 4 with a clear message
-- [ ] e2e: unwritable output folder → exit 2 with a clear message
+- [ ] e2e: a second agent on the same `--output-dir` exits 5 with a clear message
+- [ ] e2e: output folder becomes unwritable mid-run → reported, agent keeps running or exits 3 cleanly
 
 ---
 

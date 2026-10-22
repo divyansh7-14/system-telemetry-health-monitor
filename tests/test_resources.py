@@ -16,14 +16,14 @@ def test_memory_used_is_total_minus_available(fake_psutil):
 def test_disks_skip_cdrom_squashfs_and_unreadable(fake_psutil, caplog):
     warned: set[str] = set()
     disks = collect_disks(warned)
-    assert [d.mountpoint for d in disks] == ["C:\\\\"]
+    assert [d.mountpoint for d in disks] == ["C:\\"]
     c = disks[0]
     assert c.used_percent == 60.0
     assert c.free_percent == 40.0
-    assert "E:\\\\" in warned  # unreadable drive logged...
+    assert "E:\\" in warned  # unreadable drive logged...
     caplog.clear()
     collect_disks(warned)
-    assert "E:\\\\" not in caplog.text  # ...only once
+    assert "E:\\" not in caplog.text  # ...only once
 
 
 def test_disk_free_percent_ignores_reserved_blocks(fake_psutil, monkeypatch):
@@ -71,3 +71,31 @@ def test_load_average_unsupported_returns_none(monkeypatch):
 
     monkeypatch.setattr(psutil, "getloadavg", boom)
     assert resources._load_average() is None
+
+
+def test_windows_load_average_hidden_during_warmup(monkeypatch):
+    """psutil's Windows emulation returns zeros for ~5 s; report None instead."""
+    clock = [100.0]
+    monkeypatch.setattr(resources, "_IS_WINDOWS", True)
+    monkeypatch.setattr(resources, "_MIN_PRIME_GAP", 0.0)
+    monkeypatch.setattr(resources.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        psutil, "cpu_percent", lambda interval=None, percpu=False: [1.0] if percpu else 1.0
+    )
+    monkeypatch.setattr(psutil, "getloadavg", lambda: (0.5, 0.25, 0.125))
+    sampler = CpuSampler()
+    sampler.prime()
+    clock[0] += 2
+    assert sampler.sample().load_average is None
+    clock[0] += 4
+    assert sampler.sample().load_average == [0.5, 0.25, 0.12]
+
+
+def test_linux_load_average_available_immediately(monkeypatch):
+    monkeypatch.setattr(resources, "_IS_WINDOWS", False)
+    monkeypatch.setattr(resources, "_MIN_PRIME_GAP", 0.0)
+    monkeypatch.setattr(
+        psutil, "cpu_percent", lambda interval=None, percpu=False: [1.0] if percpu else 1.0
+    )
+    monkeypatch.setattr(psutil, "getloadavg", lambda: (1.0, 2.0, 3.0))
+    assert CpuSampler().sample().load_average == [1.0, 2.0, 3.0]

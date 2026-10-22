@@ -9,7 +9,9 @@ counter once, so every later sample covers the whole time since the last one
 from __future__ import annotations
 
 import logging
+import sys
 import time
+from typing import Any
 
 import psutil
 
@@ -20,6 +22,10 @@ log = logging.getLogger(__name__)
 # Mounts that can never "fill up" and would only produce false disk alerts.
 _SKIP_FSTYPES = {"squashfs", "iso9660", "udf", "cdfs", "devtmpfs", "tmpfs", "overlay"}
 _MIN_PRIME_GAP = 0.1  # psutil recommends >= 0.1 s between non-blocking calls
+# Windows has no load average; psutil emulates it with a background thread whose
+# first ~5 s of values are meaningless zeros, so report None until it has warmed up.
+_WINDOWS_LOADAVG_WARMUP = 5.5
+_IS_WINDOWS = sys.platform == "win32"
 
 
 class CpuSampler:
@@ -27,11 +33,15 @@ class CpuSampler:
 
     def __init__(self) -> None:
         self._primed_at: float | None = None
+        self._loadavg_since: float | None = None
 
     def prime(self) -> None:
         psutil.cpu_percent(interval=None)
         psutil.cpu_percent(interval=None, percpu=True)
         self._primed_at = time.monotonic()
+        if self._loadavg_since is None:
+            _load_average()  # on Windows this starts psutil's emulation thread
+            self._loadavg_since = self._primed_at
 
     def sample(self) -> CpuStats:
         if self._primed_at is None:
@@ -45,8 +55,15 @@ class CpuSampler:
         return CpuStats(
             percent=round(overall, 1),
             per_core_percent=[round(p, 1) for p in per_core],
-            load_average=_load_average(),
+            load_average=self._load_average_if_ready(),
         )
+
+    def _load_average_if_ready(self) -> list[float] | None:
+        if _IS_WINDOWS:
+            since = self._loadavg_since or time.monotonic()
+            if time.monotonic() - since < _WINDOWS_LOADAVG_WARMUP:
+                return None
+        return _load_average()
 
 
 def _load_average() -> list[float] | None:
@@ -70,7 +87,7 @@ def collect_memory() -> MemoryStats:
     )
 
 
-def _should_skip(part: psutil._common.sdiskpart) -> str | None:
+def _should_skip(part: Any) -> str | None:  # part: psutil sdiskpart named tuple
     """Return a reason to skip this partition, or None to keep it."""
     opts = {o.strip().lower() for o in part.opts.split(",")}
     if "cdrom" in opts:

@@ -1,10 +1,11 @@
 [project]
 name = "sysmon-agent"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Cross-platform Python agent that monitors CPU, RAM, disk, network and processes against configurable thresholds."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = ["psutil>=5.9", "PyYAML>=6.0"]
 
 [project.optional-dependencies]
@@ -14,8 +15,11 @@ dev = ["pytest>=8.0", "ruff>=0.5"]
 sysmon = "sysmon.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = { attr = "sysmon.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["sysmon*"]

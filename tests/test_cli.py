@@ -64,8 +64,38 @@ def test_once_writes_host_info(tmp_path, monkeypatch, capsys):
     assert "== Host ==" in out and "== Resources ==" in out
 
 
-def test_unwritable_output_dir_exits_2(tmp_path, capsys):
+def test_unwritable_output_dir_exits_3(tmp_path, capsys):
     blocker = tmp_path / "a_file"
     blocker.write_text("x")
-    assert main(["--once", "--output-dir", str(blocker / "sub")]) == 2
+    assert main(["--once", "--output-dir", str(blocker / "sub")]) == 3
     assert "cannot write to output directory" in capsys.readouterr().err
+
+
+def test_bad_flag_is_usage_error_2_not_output_error(capsys):
+    """argparse exits 2; that code must not also mean 'output dir not writable'."""
+    with pytest.raises(SystemExit) as exc:
+        main(["--interval", "5"])
+    assert exc.value.code == 2
+
+
+def test_host_info_write_failure_exits_3_without_traceback(tmp_path, monkeypatch, capsys):
+    from sysmon import cli
+
+    def disk_full(*_a, **_k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(cli, "write_json_atomic", disk_full)
+    monkeypatch.setattr(cli, "ONCE_SAMPLE_SECONDS", 0.0)
+    assert main(["--once", "--output-dir", str(tmp_path)]) == 3
+    assert "No space left on device" in capsys.readouterr().err
+
+
+def test_ctrl_c_stops_cleanly(tmp_path, monkeypatch, capsys):
+    from sysmon import cli
+
+    def interrupt(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", interrupt)
+    assert main(["--once", "--output-dir", str(tmp_path)]) == 0
+    assert "interrupted" in capsys.readouterr().err

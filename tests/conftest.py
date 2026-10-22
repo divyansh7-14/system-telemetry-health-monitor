@@ -17,14 +17,14 @@ def fake_psutil(monkeypatch):
 
     gib = 1024**3
     partitions = [
-        Part("C:\\\\", "C:\\\\", "NTFS", "rw,fixed"),
-        Part("D:\\\\", "D:\\\\", "", "cdrom"),
+        Part("C:\\", "C:\\", "NTFS", "rw,fixed"),
+        Part("D:\\", "D:\\", "", "cdrom"),
         Part("/dev/loop0", "/snap/core", "squashfs", "ro"),
-        Part("E:\\\\", "E:\\\\", "NTFS", "rw,fixed"),
+        Part("E:\\", "E:\\", "NTFS", "rw,fixed"),
     ]
     usages = {
-        "C:\\\\": Usage(100 * gib, 60 * gib, 40 * gib, 60.0),
-        "E:\\\\": PermissionError("access denied"),
+        "C:\\": Usage(100 * gib, 60 * gib, 40 * gib, 60.0),
+        "E:\\": PermissionError("access denied"),
     }
 
     def disk_usage(path):

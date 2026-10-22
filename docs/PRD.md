@@ -53,7 +53,7 @@ in a config file, and writes structured reports and alerts so a problem is visib
 - **FR-6** Each cycle appends one JSON object to `metrics.jsonl` (schema in §7) and prints a short console summary.
 
 ### Rules & alerts (Phase 3)
-- **FR-7** Load thresholds from YAML or JSON (chosen by extension). Missing file → built-in defaults with a log line saying so. Invalid file → clear error and exit code 3; the agent never starts with a half-understood config.
+- **FR-7** Load thresholds from YAML or JSON (chosen by extension). Missing file → built-in defaults with a log line saying so. Invalid file → clear error and exit code 4; the agent never starts with a half-understood config.
 - **FR-8** Supported rules (names follow the brief): `cpu_max`, `memory_max`, `swap_max`, `disk_min_free` (checked per disk), `process_cpu_max`, `process_memory_max`. Each takes `warning` and `critical` levels; a bare number (e.g. `cpu_max: 85`) means the critical level only.
 - **FR-9** Each cycle produces a status per check and an overall host status = the worst check.
 - **FR-10** Anti-flapping: a check becomes WARNING/CRITICAL only after `consecutive` breaching cycles in a row (default 2), and returns to OK only after the value is back inside the limit by `recovery_margin` points (default 5). This stops a value hovering at 85 % from flooding the log.
@@ -63,7 +63,7 @@ in a config file, and writes structured reports and alerts so a problem is visib
 - **FR-12** Flags: `--interval`, `--threshold-config`, `--output-dir`, `--top-n`, `--once`, `--log-level`, `--max-log-mb`, `--backup-count`, `--version`. Precedence: **CLI flag > config file > built-in default.**
 - **FR-13** Log files: `agent.log` (diagnostics), `alerts.log` (breaches), `metrics.jsonl` (snapshots). Each rotates at `max_log_mb` (default 5 MB) keeping `backup_count` old files (default 3), so disk use is bounded (~4 × 5 MB × 3 files = 60 MB worst case).
 - **FR-14** Graceful shutdown on Ctrl+C (SIGINT), Ctrl+Break (SIGBREAK, Windows) and SIGTERM (Linux): finish or abandon the current cycle, write a final "agent stopped" line, flush and close every log, exit 0.
-- **FR-15** Error handling: unwritable output dir → exit 2; bad config → exit 3; a collector that throws is logged and recorded in that cycle's `errors` list while the other collectors still run; a full disk or locked log file is reported, not a crash. Unexpected errors → exit 1 with the traceback in `agent.log`.
+- **FR-15** Error handling: bad flags → exit 2; unwritable output dir or file → exit 3; bad config → exit 4; second agent on the same output dir → exit 5; a collector that throws is logged and recorded in that cycle's `errors` list while the other collectors still run; a full disk or locked log file is reported, not a crash. Unexpected errors → exit 1 with the traceback in `agent.log`.
 - **FR-16** Only one agent may write to an output directory at a time (lock file), because two writers rotating the same file on Windows fail with *WinError 32*.
 
 ### Deliverables (Phase 5)
@@ -124,7 +124,7 @@ The same keys work in `config.json`. Unknown keys produce a warning (catches typ
 ```
 
 ### Exit codes
-`0` normal stop · `1` unexpected error · `2` output directory not writable · `3` invalid config · `4` another agent already uses this output directory.
+`0` normal stop (including Ctrl+C) · `1` unexpected error · `2` bad command-line arguments (argparse's own code) · `3` output directory or file not writable · `4` invalid config · `5` another agent already uses this output directory.
 
 ## 8. Architecture
 

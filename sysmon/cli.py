@@ -18,7 +18,12 @@ MIN_INTERVAL = 10
 MAX_INTERVAL = 30
 DEFAULT_INTERVAL = 15
 ONCE_SAMPLE_SECONDS = 1.0
-EXIT_OUTPUT_DIR = 2
+
+# Exit codes. 2 is reserved for command-line usage errors (argparse uses it).
+EXIT_OK = 0
+EXIT_UNEXPECTED = 1
+EXIT_USAGE = 2
+EXIT_OUTPUT_DIR = 3
 
 
 def _interval(value: str) -> int:
@@ -62,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
             "processes, checks them against configurable thresholds, and logs "
             "OK / WARNING / CRITICAL status."
         ),
+        epilog="exit codes: 0 ok, 1 unexpected error, 2 bad arguments, 3 output not writable",
     )
     parser.add_argument(
         "--interval",
@@ -128,7 +134,15 @@ def prepare_output_dir(path: str) -> Path:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv)  # exits with EXIT_USAGE on bad flags
+    try:
+        return _run(args)
+    except KeyboardInterrupt:
+        print("\nsysmon: interrupted, stopping.", file=sys.stderr)
+        return EXIT_OK
+
+
+def _run(args: argparse.Namespace) -> int:
     logging.basicConfig(level=args.log_level, format="%(levelname)s %(name)s: %(message)s")
 
     try:
@@ -140,7 +154,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_OUTPUT_DIR
 
     host = collect_host_info()
-    write_json_atomic(out_dir / "host_info.json", host.to_dict())
+    try:
+        write_json_atomic(out_dir / "host_info.json", host.to_dict())
+    except OSError as exc:
+        print(f"sysmon: cannot write host_info.json in {out_dir}: {exc}", file=sys.stderr)
+        return EXIT_OUTPUT_DIR
 
     cpu = CpuSampler()
     cpu.prime()
@@ -153,4 +171,4 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if not args.once:
         print("Continuous polling is added in Phase 2; ran a single cycle.")
-    return 0
+    return EXIT_OK

@@ -22,9 +22,12 @@ python -m sysmon --help
 
 ```bash
 pip install -r requirements-dev.txt
-pytest
-ruff check .
+ruff check .                          # lint
+pytest                                # unit tests (psutil is faked, results are deterministic)
+python scripts/e2e_check.py all       # runs the real agent and cross-checks it with OS tools
 ```
+
+CI runs all three on Windows and Ubuntu with Python 3.10, 3.12 and 3.14.
 
 ## License
 
