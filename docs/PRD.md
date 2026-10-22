@@ -62,7 +62,7 @@ in a config file, and writes structured reports and alerts so a problem is visib
 ### CLI, logs & resilience (Phase 1 CLI done; rest Phase 4)
 - **FR-12** Flags: `--interval`, `--threshold-config`, `--output-dir`, `--top-n`, `--once`, `--log-level`, `--max-log-mb`, `--backup-count`, `--version`. Precedence: **CLI flag > config file > built-in default.**
 - **FR-13** Log files: `agent.log` (diagnostics), `alerts.log` (breaches), `metrics.jsonl` (snapshots). Each rotates at `max_log_mb` (default 5 MB) keeping `backup_count` old files (default 3), so disk use is bounded (~4 × 5 MB × 3 files = 60 MB worst case).
-- **FR-14** Graceful shutdown on Ctrl+C (SIGINT), Ctrl+Break (SIGBREAK, Windows) and SIGTERM (Linux): finish or abandon the current cycle, write a final "agent stopped" line, flush and close every log, exit 0.
+- **FR-14** Graceful shutdown on Ctrl+C (SIGINT), Ctrl+Break (SIGBREAK, Windows) and SIGTERM (Linux), and — for a background agent with no console — on `sysmon --stop --output-dir DIR`: finish or abandon the current cycle, write a final "agent stopped" line, flush and close every log, exit 0. Losing the console (closed terminal, pipe reader gone, no console under `pythonw`) never stops monitoring.
 - **FR-15** Error handling: bad flags → exit 2; unwritable output dir or file → exit 3; bad config → exit 4; second agent on the same output dir → exit 5; a collector that throws is logged and recorded in that cycle's `errors` list while the other collectors still run; a full disk or locked log file is reported, not a crash. Unexpected errors → exit 1 with the traceback in `agent.log`.
 - **FR-16** Only one agent may write to an output directory at a time (lock file), because two writers rotating the same file on Windows fail with *WinError 32*.
 
@@ -161,6 +161,9 @@ Data flow per cycle: **collectors → `Snapshot` → rules → `Checks` → writ
 | Network counters can wrap or reset (adapter restart) | psutil `nowrap=True` (default); a negative delta gives a null rate for that cycle |
 | Summing all adapters double-counts mirrored traffic (found in CI: 18.9 MB download reported as 38.8 MB) | Totals/rates counted on the default-route interface only |
 | Some Windows kernel processes have no readable name (found in CI: PID 92) | Labelled `[protected system process]` |
+| Windows' monotonic clock keeps running during laptop sleep → wake looks like a huge overrun | Detected as a pause; schedule re-anchored and logged as such |
+| Console disappears while running (closed terminal, pipe closed) or never exists (`pythonw`) | Console output is best-effort; metrics keep being written (verified on Windows + Linux) |
+| Normal laptop users are not administrators (CI is) | e2e runs the agent as a real standard Windows user and compares with the admin view |
 
 ## 10. Success criteria (definition of done)
 

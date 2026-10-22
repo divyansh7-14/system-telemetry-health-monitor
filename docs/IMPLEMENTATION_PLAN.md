@@ -93,6 +93,18 @@ Found and fixed by the Windows/Linux runs:
 - Windows kernel process (PID 92, Memory Compression / Registry / Secure System) has an empty name → labelled
 - Totals summed all adapters → mirrored traffic counted twice (18.9 MB showed as 38.8 MB) → counted on default-route interface
 
+Full re-review of Phases 0–2 (22 Oct, night) — fixed:
+- Laptop sleep: Windows' monotonic clock runs during sleep, so on wake the agent logged "cycle took longer than the interval; skipping 360 ticks". Now detected as a pause, schedule re-anchored, logged honestly.
+- Console disappearing (pipe reader exits, terminal closed) raised from `print` and stopped the agent. Console output is now best-effort; stdout is pointed at the null device on failure, monitoring continues.
+- A run killed mid-write left a partial last line that the next run appended to. The next run now starts on a fresh line.
+- e2e harness: GitHub truncates each annotation at ~4 KB, hiding late lines → failures now reported first and long reports split; a crashing section is now reported as a FAIL instead of killing the report.
+
+New verification (CI run on commit `148e79e`, 6/6 jobs, 55/55 checks on each Windows job, 41/41 on Linux):
+- [x] CI's Windows user is an administrator, so a **real standard (non-admin) user** is now created and the agent run as that user: memory measured for 100 % of processes, top-memory list identical to the admin view, CPU of an admin-owned process seen correctly (~25 %), every process named, `sysmon --once` clean
+- [x] **Background mode**: `pythonw` launched fully detached (verified `sys.stdout is None`) runs `--once` and continuous polling correctly
+- [x] Console closed mid-run (Windows and Linux): agent warns once, keeps writing metrics, exits 0 on Ctrl+Break / Ctrl+C
+- [x] Linux CI runs as a normal user (uid 1001), not root
+
 ---
 
 ## Phase 3 — Health rules & alert engine  *(Brief task 3)*
@@ -131,8 +143,9 @@ Found and fixed by the Windows/Linux runs:
    - `RotatingFileHandler(maxBytes=max_log_mb*1MB, backupCount, encoding="utf-8", delay=True)` for `agent.log`, `alerts.log`, `metrics.jsonl` (metrics via a dedicated logger with a bare `%(message)s` formatter).
    - Override `handleError` so a failed rollover (Windows *WinError 32*) or full disk is reported once to stderr/agent.log and the agent keeps running.
    - Single-instance lock: `sysmon.lock` holding the PID, created with `O_EXCL`; stale lock (PID not running) is replaced; live lock → exit 5.
-2. Signals: SIGINT always; SIGBREAK on Windows; SIGTERM on Linux. Handler only sets `stop_event`. `finally:` writes "agent stopped after N cycles", closes handlers, removes the lock.
-3. Error audit: wrap `main()` so an unexpected exception is logged with traceback to `agent.log` and exits 1; permission errors on disks/processes stay quiet-but-logged-once.
+2. Signals (handlers already built in Phase 2): `finally:` writes "agent stopped after N cycles", closes handlers, removes the lock.
+3. **Graceful stop for a background agent** (found in the Phase 0–2 re-review): an agent started with `pythonw` or Task Scheduler has no console, so Ctrl+C is impossible and killing it skips the clean shutdown. Add `sysmon --stop --output-dir DIR`, which asks the agent owning that directory's lock to stop (stop-request file checked every wait slice), waits for it, and reports the result.
+4. Error audit: wrap `main()` so an unexpected exception is logged with traceback to `agent.log` and exits 1; permission errors on disks/processes stay quiet-but-logged-once.
 
 **Tests**
 - Rotation: tiny `max_log_mb` → backup files appear, count never exceeds `backup_count + 1`.
@@ -146,6 +159,7 @@ Found and fixed by the Windows/Linux runs:
 - [ ] e2e: CTRL_BREAK_EVENT (Windows) / SIGTERM (Linux) and Ctrl+C all stop cleanly with the final log line; lock file removed
 - [ ] e2e: a second agent on the same `--output-dir` exits 5 with a clear message
 - [ ] e2e: output folder becomes unwritable mid-run → reported, agent keeps running or exits 3 cleanly
+- [ ] e2e: a detached `pythonw` agent is stopped with `sysmon --stop`: final log line written, lock removed, exit 0
 
 ---
 
