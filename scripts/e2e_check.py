@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -610,7 +611,7 @@ def phase2(out: Path, rep: Report) -> None:
 
 # ------------------------------------------------------------ robustness (all phases)
 NONADMIN_USER = "sysmone2e"
-NONADMIN_PASS = "Sysm0n!E2e#Check2026"
+NONADMIN_PASS = "Sm0n!e2e#2026"  # <= 14 chars: longer makes `net user` stop and ask Y/N
 DIAG = """
 import json, os, sys, time
 import psutil
@@ -744,7 +745,7 @@ function RunAs([string]$argStr, [string]$tag) {{
   $p = [System.Diagnostics.Process]::Start($psi)
   $out = $p.StandardOutput.ReadToEndAsync()
   $err = $p.StandardError.ReadToEnd()
-  $p.WaitForExit()
+  if (-not $p.WaitForExit(120000)) {{ $p.Kill(); return -1 }}
   [IO.File]::WriteAllText('{base}/' + $tag + '.err', $err)
   [IO.File]::WriteAllText('{base}/' + $tag + '.out', $out.Result)
   return $p.ExitCode
@@ -816,7 +817,11 @@ def main() -> int:
     rep = Report(args.phase)
     for name in names:
         for fn in PHASES[name]:
-            fn(out, rep)
+            try:
+                fn(out, rep)
+            except Exception:  # noqa: BLE001 - a crashing section must still produce a report
+                tb = traceback.format_exc().strip().splitlines()
+                rep.check(f"{fn.__name__} section ran to completion", False, " | ".join(tb[-6:]))
     return rep.finish()
 
 
