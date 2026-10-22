@@ -140,3 +140,31 @@ def test_continuous_mode_stops_on_signal(tmp_path, fast, monkeypatch, capsys):
     assert main(["--output-dir", str(tmp_path), "--interval", "10"]) == 0
     out = capsys.readouterr().out
     assert "stopped after 2 cycle(s)" in out
+
+
+def test_no_console_pythonw_style(tmp_path, fast, monkeypatch):
+    """pythonw / Task Scheduler: sys.stdout and sys.stderr are None."""
+    import json
+    import sys
+
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    assert main(["--once", "--output-dir", str(tmp_path)]) == 0
+    assert json.loads((tmp_path / "metrics.jsonl").read_text(encoding="utf-8"))["cycle"] == 1
+
+
+def test_console_that_breaks_is_silenced_once(tmp_path, fast, monkeypatch, caplog):
+    import io
+    import sys
+
+    class Broken(io.StringIO):
+        def write(self, _text):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def fileno(self):
+            raise io.UnsupportedOperation("no fd")
+
+    monkeypatch.setattr(sys, "stdout", Broken())
+    assert main(["--once", "--output-dir", str(tmp_path)]) == 0
+    assert caplog.text.count("console output is unavailable") == 1
+    assert (tmp_path / "metrics.jsonl").exists()

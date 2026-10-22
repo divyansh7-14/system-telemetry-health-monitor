@@ -10,7 +10,11 @@ Design notes
   stop request (Ctrl+C, Ctrl+Break, SIGTERM, or a test) takes effect within
   ~0.25 s on every OS.
 * Fault isolation: each collector runs in its own try/except. A failing collector
-  is recorded in the snapshot's ``errors`` list and the others still run.
+  is recorded in the snapshot's ``errors`` list and the others still run. A broken
+  console (closed pipe, no console under pythonw) never stops data collection.
+* Sleep/resume: on Windows the monotonic clock keeps running while a laptop
+  sleeps. If the agent wakes far behind schedule, the schedule is re-anchored
+  and the gap is logged as a pause, not blamed on a slow cycle.
 """
 
 from __future__ import annotations
@@ -61,6 +65,8 @@ class Agent:
         self.network = NetworkSampler(clock=clock)
         self._disk_warned: set[str] = set()
         self._write_failed = False
+        self._display_failed = False
+        self._checked_tail = False
 
     # -------------------------------------------------------------- lifecycle
     def stop(self) -> None:
@@ -85,6 +91,14 @@ class Agent:
             return self.cycles
         next_tick = self.clock()
         while True:
+            late = self.clock() - next_tick
+            if late > self.interval:
+                log.info(
+                    "resumed %.0fs behind schedule (system sleep or paused process); "
+                    "schedule re-aligned",
+                    late,
+                )
+                next_tick = self.clock()
             self.run_cycle()
             if max_cycles is not None and self.cycles >= max_cycles:
                 break
@@ -147,12 +161,21 @@ class Agent:
         )
         self._write(snap)
         if self.on_snapshot:
-            self.on_snapshot(snap)
+            try:
+                self.on_snapshot(snap)
+            except Exception as exc:  # noqa: BLE001 - display is optional, monitoring is not
+                if not self._display_failed:
+                    log.warning("console output failed (%s); still writing metrics", exc)
+                self._display_failed = True
         return snap
 
     def _write(self, snap: Snapshot) -> None:
         """Append one JSON line. A failed write is reported, never fatal."""
         line = json.dumps(snap.to_dict(), ensure_ascii=False, separators=(",", ":")) + "\n"
+        if not self._checked_tail:
+            # A previous run killed mid-write leaves a partial last line; start on a
+            # fresh line so that damage never spreads to this run's first record.
+            line = self._newline_if_unterminated() + line
         try:
             # Opened per write: no long-lived handle that would block rotation on Windows.
             with self.metrics_path.open("a", encoding="utf-8") as fh:
@@ -162,9 +185,21 @@ class Agent:
                 log.error("cannot write %s: %s (will keep trying)", self.metrics_path, exc)
             self._write_failed = True
         else:
+            self._checked_tail = True
             if self._write_failed:
                 log.info("writing %s works again", self.metrics_path)
             self._write_failed = False
+
+    def _newline_if_unterminated(self) -> str:
+        try:
+            with self.metrics_path.open("rb") as fh:
+                fh.seek(0, 2)
+                if fh.tell() == 0:
+                    return ""
+                fh.seek(-1, 2)
+                return "" if fh.read(1) == b"\n" else "\n"
+        except OSError:
+            return ""
 
 
 # ------------------------------------------------------------------ signals

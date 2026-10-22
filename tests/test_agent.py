@@ -163,3 +163,63 @@ def test_signal_handler_requests_stop_and_restores(tmp_path):
     finally:
         restore()
     assert signal.getsignal(signal.SIGINT) is before
+
+
+def test_resume_after_sleep_realigns_without_blaming_the_cycle(fake_agent, monkeypatch, caplog):
+    """Laptop sleeps for an hour during a wait: next cycle runs on wake, then every 10 s."""
+    starts = []
+    real = fake_agent.run_cycle
+
+    def record():
+        starts.append(fake_agent.clock_obj.now)
+        return real()
+
+    fake_agent.run_cycle = record
+    awake_wait = fake_agent.stop_event.wait
+    slept = []
+
+    def wait_through_sleep(timeout):
+        if len(starts) == 2 and not slept:  # lid closed during the wait after cycle 2
+            slept.append(True)
+            fake_agent.clock_obj.now += 3600
+        return awake_wait(timeout)
+
+    monkeypatch.setattr(fake_agent.stop_event, "wait", wait_through_sleep)
+    import logging
+
+    caplog.set_level(logging.INFO)
+    fake_agent.run(max_cycles=5)
+    rel = [round(s - starts[0], 3) for s in starts]
+    assert rel[:2] == [0.0, 10.0]
+    assert [b - a for a, b in zip(rel[2:], rel[3:], strict=False)] == [10.0, 10.0]
+    assert "behind schedule (system sleep" in caplog.text
+    assert "took longer than" not in caplog.text
+
+
+def test_broken_console_does_not_stop_monitoring(fake_agent, tmp_path, caplog):
+    calls = []
+
+    def broken_print(snap):
+        calls.append(snap.cycle)
+        raise BrokenPipeError(32, "Broken pipe")
+
+    fake_agent.on_snapshot = broken_print
+    assert fake_agent.run(max_cycles=3) == 3
+    assert len(read_lines(tmp_path / "metrics.jsonl")) == 3
+    assert caplog.text.count("console output failed") == 1
+
+
+def test_partial_last_line_from_killed_run_is_isolated(fake_agent, tmp_path):
+    (tmp_path / "metrics.jsonl").write_text(
+        '{"cycle":1}\n{"cycle":2,"cpu":{"perc', encoding="utf-8"
+    )
+    fake_agent.run(max_cycles=2)
+    lines = (tmp_path / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+    assert lines[1] == '{"cycle":2,"cpu":{"perc'  # damage stays on its own line
+    assert [json.loads(x)["cycle"] for x in lines[2:]] == [1, 2]
+
+
+def test_no_blank_line_added_to_clean_file(fake_agent, tmp_path):
+    (tmp_path / "metrics.jsonl").write_text('{"cycle":1}\n', encoding="utf-8")
+    fake_agent.run(max_cycles=1)
+    assert "" not in (tmp_path / "metrics.jsonl").read_text(encoding="utf-8").splitlines()

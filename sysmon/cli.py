@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -123,6 +124,34 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_console_ok = True
+
+
+def say(text: str) -> None:
+    """Print to the console if there is one. Never raises.
+
+    The console can disappear (output piped into a program that exits, a closed
+    terminal) or never exist (pythonw / Task Scheduler: sys.stdout is None).
+    Monitoring must carry on either way, so the first failure switches stdout to
+    the null device, which also stops Python failing again when it flushes at exit.
+    """
+    global _console_ok
+    if not _console_ok or sys.stdout is None:
+        return
+    try:
+        print(text, flush=True)
+    except (OSError, ValueError) as exc:
+        _console_ok = False
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        except (OSError, ValueError, AttributeError):
+            pass
+        logging.getLogger("sysmon").warning(
+            "console output is unavailable (%s); still writing metrics", exc
+        )
+
+
 def prepare_output_dir(path: str) -> Path:
     """Create the output directory and confirm it is writable."""
     out = Path(path).expanduser().resolve()
@@ -134,6 +163,8 @@ def prepare_output_dir(path: str) -> Path:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    global _console_ok
+    _console_ok = True
     args = build_parser().parse_args(argv)  # exits with EXIT_USAGE on bad flags
     # Never crash on a process or host name the console code page cannot show.
     for stream in (sys.stdout, sys.stderr):
@@ -142,8 +173,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return _run(args)
     except KeyboardInterrupt:
-        print("\nsysmon: interrupted, stopping.", file=sys.stderr)
+        if sys.stderr is not None:
+            print("\nsysmon: interrupted, stopping.", file=sys.stderr)
         return EXIT_OK
+
+
+def _error(text: str) -> None:
+    if sys.stderr is not None:
+        try:
+            print(text, file=sys.stderr)
+        except (OSError, ValueError):
+            pass
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -160,18 +200,16 @@ def _run(args: argparse.Namespace) -> int:
     try:
         out_dir = prepare_output_dir(args.output_dir)
     except OSError as exc:
-        print(
-            f"sysmon: cannot write to output directory {args.output_dir!r}: {exc}", file=sys.stderr
-        )
+        _error(f"sysmon: cannot write to output directory {args.output_dir!r}: {exc}")
         return EXIT_OUTPUT_DIR
 
     host = collect_host_info()
     try:
         write_json_atomic(out_dir / "host_info.json", host.to_dict())
     except OSError as exc:
-        print(f"sysmon: cannot write host_info.json in {out_dir}: {exc}", file=sys.stderr)
+        _error(f"sysmon: cannot write host_info.json in {out_dir}: {exc}")
         return EXIT_OUTPUT_DIR
-    print(format_host_info(host))
+    say(format_host_info(host))
 
     interval = args.interval or DEFAULT_INTERVAL
     first = True
@@ -179,13 +217,13 @@ def _run(args: argparse.Namespace) -> int:
     def show(snap: Snapshot) -> None:
         nonlocal first
         if first:
-            print(format_network(snap))
-            print(
+            say(format_network(snap))
+            say(
                 f"\nWriting {out_dir / 'metrics.jsonl'}"
                 + ("" if args.once else f" every {interval}s. Press Ctrl+C to stop.")
             )
             first = False
-        print(format_snapshot(snap), flush=True)
+        say(format_snapshot(snap))
 
     agent = Agent(out_dir, interval, args.top_n or DEFAULT_TOP_N, on_snapshot=show)
     restore = install_stop_handlers(agent)
@@ -194,5 +232,5 @@ def _run(args: argparse.Namespace) -> int:
     finally:
         restore()
     if not args.once:
-        print(f"\nsysmon: stopped after {cycles} cycle(s).")
+        say(f"\nsysmon: stopped after {cycles} cycle(s).")
     return EXIT_OK

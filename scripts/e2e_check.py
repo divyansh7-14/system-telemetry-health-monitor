@@ -581,7 +581,177 @@ def phase2(out: Path, rep: Report) -> None:
         )
 
 
-PHASES = {"phase1": [phase1], "phase2": [phase2]}
+# ------------------------------------------------------------ robustness (all phases)
+NONADMIN_USER = "sysmone2e"
+NONADMIN_PASS = "Sysm0n!E2e#Check2026"
+DIAG = """
+import json, os, sys, time
+import psutil
+from sysmon.collectors.processes import ProcessSampler
+admin = None
+if os.name == "nt":
+    import ctypes
+    admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+s = ProcessSampler(top_n=100000); s.prime(); time.sleep(1.0); t = s.sample()
+out = {"admin": admin, "user": psutil.Process().username(), "stdout": repr(sys.stdout),
+       "procs": [[p.pid, p.name, p.memory_rss_bytes, p.username] for p in t.by_memory]}
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(out, fh)
+"""
+
+
+def _snapshot_procs() -> dict[int, list]:
+    from sysmon.collectors.processes import ProcessSampler
+
+    s = ProcessSampler(top_n=100_000)
+    s.prime()
+    time.sleep(1.0)
+    return {p.pid: [p.pid, p.name, p.memory_rss_bytes, p.username] for p in s.sample().by_memory}
+
+
+def robustness(out: Path, rep: Report) -> None:
+
+    d = out / "robust"
+    d.mkdir(exist_ok=True)
+
+    # --- who are we running as? (CI runners are admin on Windows, non-root on Linux)
+    if IS_WINDOWS:
+        import ctypes
+
+        rep.info(f"e2e runs as admin: {bool(ctypes.windll.shell32.IsUserAnAdmin())}")
+    else:
+        rep.info(f"e2e runs as uid {os.geteuid()}")
+
+    # --- console goes away mid-run: agent must keep monitoring and exit cleanly
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0
+    bp = d / "broken_pipe"
+    agent = subprocess.Popen(
+        [sys.executable, "-m", "sysmon", "--interval", "10", "--output-dir", str(bp)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=flags,
+    )
+    agent.stdout.readline()  # it is alive and printing
+    agent.stdout.close()  # reader goes away (like `| head` or a closed terminal)
+    snaps = _wait_cycles(bp / "metrics.jsonl", 3, 45)
+    agent.send_signal(signal.CTRL_BREAK_EVENT if IS_WINDOWS else signal.SIGINT)
+    try:
+        code = agent.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        agent.kill()
+        code = "killed"
+    err = agent.stderr.read().decode("utf-8", "replace")
+    rep.check(
+        "console closed mid-run: keeps monitoring, exits 0, no traceback",
+        len(snaps) >= 3 and code == 0 and "Traceback" not in err,
+        f"{len(snaps)} cycles after console closed, exit={code}, stderr={err.strip()[-160:]}",
+    )
+
+    if not IS_WINDOWS:
+        return
+
+    # --- pythonw: no console at all (how a background agent runs on Windows)
+    pyw = str(Path(sys.executable).with_name("pythonw.exe"))
+    diag_py = d / "diag.py"
+    diag_py.write_text(DIAG, encoding="utf-8")
+    run([pyw, str(diag_py), str(d / "pyw_diag.json")])
+    try:
+        pyw_stdout = json.loads((d / "pyw_diag.json").read_text(encoding="utf-8"))["stdout"]
+    except (OSError, ValueError):
+        pyw_stdout = "diag failed"
+    rep.info(f"under pythonw sys.stdout is {pyw_stdout}")
+    pw = d / "pythonw_once"
+    res = subprocess.run([pyw, "-m", "sysmon", "--once", "--output-dir", str(pw)], timeout=120)
+    lines = _read_snapshots(pw / "metrics.jsonl")
+    rep.check(
+        "pythonw (no console) --once: exit 0, one clean snapshot",
+        res.returncode == 0 and len(lines) == 1 and not lines[0]["errors"],
+        f"exit={res.returncode} lines={len(lines)}",
+    )
+    pwc = d / "pythonw_loop"
+    bg = subprocess.Popen([pyw, "-m", "sysmon", "--interval", "10", "--output-dir", str(pwc)])
+    bg_snaps = _wait_cycles(pwc / "metrics.jsonl", 2, 30)
+    alive = bg.poll() is None
+    bg.kill()
+    rep.check(
+        "pythonw (no console) continuous: keeps polling",
+        alive and len(bg_snaps) >= 2,
+        f"alive={alive} cycles={len(bg_snaps)}",
+    )
+
+    # --- standard (non-admin) Windows user: the normal laptop case
+    base = Path("C:/sysmon-e2e-user")
+    base.mkdir(exist_ok=True)
+    run(["icacls", str(base), "/grant", "Users:(OI)(CI)M", "/T", "/Q"])
+    (base / "diag.py").write_text(DIAG, encoding="utf-8")
+    ps = f"""
+$ErrorActionPreference = 'Stop'
+$pw = ConvertTo-SecureString '{NONADMIN_PASS}' -AsPlainText -Force
+if (-not (Get-LocalUser -Name '{NONADMIN_USER}' -ErrorAction SilentlyContinue)) {{
+  New-LocalUser -Name '{NONADMIN_USER}' -Password $pw -AccountNeverExpires | Out-Null
+  Add-LocalGroupMember -Group 'Users' -Member '{NONADMIN_USER}'
+}}
+$cred = New-Object System.Management.Automation.PSCredential('{NONADMIN_USER}', $pw)
+function RunAs($argList, $tag) {{
+  $p = Start-Process -FilePath '{sys.executable}' -ArgumentList $argList -Credential $cred `
+       -WorkingDirectory '{base}' -Wait -PassThru -NoNewWindow `
+       -RedirectStandardOutput '{base}\\$tag.out' -RedirectStandardError '{base}\\$tag.err'
+  return $p.ExitCode
+}}
+$a = RunAs @('"{base}\\diag.py"', '"{base}\\user_diag.json"') 'diag'
+$b = RunAs @('-m', 'sysmon', '--once', '--output-dir', '"{base}\\once"') 'once'
+@{{diag = $a; once = $b}} | ConvertTo-Json
+"""
+    res = run(["powershell", "-NoProfile", "-Command", ps])
+    if res.returncode != 0:
+        rep.check("run as a standard user", False, res.stderr.strip()[-400:])
+        return
+    codes = json.loads(res.stdout)
+    admin_view = _snapshot_procs()
+    try:
+        user = json.loads((base / "user_diag.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        err = (base / "diag.err").read_text(encoding="utf-8", errors="replace")[-300:]
+        rep.check("standard-user diagnostic ran", False, f"{exc} {err}")
+        return
+    rep.check(
+        "really running as a standard (non-admin) user",
+        user["admin"] is False,
+        f"user={user['user']} admin={user['admin']}",
+    )
+    user_view = {p[0]: p for p in user["procs"]}
+    both = [pid for pid in admin_view if pid in user_view and admin_view[pid][2] > 0]
+    measured = [pid for pid in both if user_view[pid][2] > 0]
+    rep.check(
+        "non-admin still measures memory of other users' / system processes (>= 95%)",
+        len(measured) >= 0.95 * len(both),
+        f"{len(measured)}/{len(both)} processes measured without admin",
+    )
+    top_admin = sorted(admin_view.values(), key=lambda p: -p[2])[:5]
+    top_user = {p[0] for p in sorted(user_view.values(), key=lambda p: -p[2])[:10]}
+    missing = [(p[0], p[1]) for p in top_admin if p[0] not in top_user]
+    rep.check(
+        "non-admin top memory list matches admin view",
+        not missing,
+        f"admin top-5 missing from non-admin top-10: {missing}",
+    )
+    rep.check(
+        "non-admin: every process has a name or label",
+        all(p[1] for p in user_view.values()),
+        f"{len(user_view)} processes",
+    )
+    no_user = sum(1 for p in user_view.values() if p[3] is None)
+    rep.info(f"non-admin: {no_user}/{len(user_view)} processes hide their owner (expected)")
+    once = _read_snapshots(base / "once" / "metrics.jsonl")
+    once_err = (base / "once.err").read_text(encoding="utf-8", errors="replace")
+    rep.check(
+        "non-admin `sysmon --once`: exit 0, snapshot with no collector errors",
+        codes.get("once") == 0 and len(once) == 1 and not once[0]["errors"],
+        f"exit={codes.get('once')} lines={len(once)} stderr={once_err.strip()[-200:]}",
+    )
+
+
+PHASES = {"phase1": [phase1], "phase2": [phase2], "robustness": [robustness]}
 
 
 def main() -> int:
