@@ -16,14 +16,15 @@ start the next phase.
 | Logging & rotation | stdlib `logging` + `RotatingFileHandler` | Size-based rotation the brief asks for |
 | Scheduling / shutdown | `time.monotonic`, `threading.Event`, `signal` | Drift-free, interruptible sleep |
 | Tests / lint | `pytest`, `ruff` | Already configured |
-| CI | GitHub Actions, Windows + Ubuntu × Py 3.10/3.12 | Already configured |
+| End-to-end checks | `scripts/e2e_check.py` | Runs the real agent and cross-checks it against independent OS tools (PowerShell/CIM on Windows, `/proc`, `df` on Linux) |
+| CI | GitHub Actions, Windows + Ubuntu × Py 3.10/3.12 | Runs ruff, pytest and the e2e checks on every push |
 
 ## Timeline (today: Thu 22 Oct)
 
 | Phase | Scope | Target |
 |---|---|---|
 | 0 | Skeleton, packaging, CI | ✅ done |
-| 1 | Host discovery + baseline CPU/RAM/disk | ✅ done — verified 22 Oct (ruff clean, 24 tests pass, live run OK) |
+| 1 | Host discovery + baseline CPU/RAM/disk | ✅ done — verified 22 Oct on Windows Server 2025 + Linux (30 unit tests, 15 e2e checks) |
 | 2 | Polling loop, top processes, network, `metrics.jsonl` | Thu 22 – Fri 23 Oct |
 | 3 | Config loader, rules engine, statuses, `alerts.log` | Sat 24 Oct |
 | 4 | Log rotation, graceful shutdown, error handling, lock file | Sun 25 Oct |
@@ -40,10 +41,12 @@ Built: `collectors/host.py`, `collectors/resources.py` (with `CpuSampler` primin
 `reporting.py`, full CLI flag set with range validation, `--once`, writable-output-dir check (exit 2).
 
 Verify (all passed 22 Oct):
-- [x] `ruff check .` clean, `pytest` 24/24
+- [x] `ruff check .` clean, `pytest` 30/30 on Windows + Linux, Py 3.10 + 3.12
+- [x] e2e on real Windows: OS name/build, RAM, physical + logical cores, uptime, C: total/free all match CIM; CPU reads 100% with every core busy
+- [x] e2e found and fixed a real bug: Windows Server 2025 was reported as "Windows 11" (Py 3.10) / "2025Server" (Py 3.12)
 - [x] `python -m sysmon --once` prints host + resources and writes `host_info.json`
 - [x] Disk filter skips CD-ROM / squashfs / unreadable drives, logs each once
-- [x] Windows 11 detected from build number
+- [x] Windows 10 / 11 / Server named correctly from build + product type
 
 ---
 
@@ -75,10 +78,10 @@ Verify (all passed 22 Oct):
 
 **Verify**
 - [ ] ruff clean, all tests pass locally and on CI (Windows + Ubuntu)
-- [ ] `python -m sysmon --interval 10` runs ≥ 3 cycles on Windows; `metrics.jsonl` has one valid line per cycle
-- [ ] Top processes look like Task Manager (start a busy loop → it appears at the top with ~100/cores %)
-- [ ] IP and MAC match `ipconfig /all`; bytes rate rises while downloading something
-- [ ] Ctrl+C stops within 1 s, no traceback
+- [ ] e2e: agent runs ≥ 3 cycles on Windows + Linux; `metrics.jsonl` has one valid line per cycle
+- [ ] e2e: a known busy-loop PID is #1 by CPU at ~100/cores %; a known memory-hog PID is #1 by memory
+- [ ] e2e: IP and MAC match `Get-NetIPAddress` / `Get-NetAdapter` (Windows) and `ip -j addr` (Linux); receive rate rises during a download
+- [ ] e2e: interrupting the agent (CTRL_C / SIGINT) stops it within 1 s, exit 0, no traceback
 
 ---
 
@@ -105,9 +108,9 @@ Verify (all passed 22 Oct):
 
 **Verify**
 - [ ] ruff + tests + CI green
-- [ ] Run with `--threshold-config config/config.yaml`; with a low test config (`cpu_max: 5`) WARNING/CRITICAL lines appear in `alerts.log` within 2 cycles; when the load stops, an OK recovery line follows
-- [ ] Broken config (typo, `critical < warning`, bad YAML) → one clear sentence and exit code 3
-- [ ] No config file → runs on defaults and says so in `agent.log`
+- [ ] e2e: with a test config and a CPU burn, `alerts.log` gets OK→WARNING→CRITICAL then a recovery line after the burn stops
+- [ ] e2e: broken configs (typo, `critical < warning`, bad YAML, bad JSON) → one clear sentence and exit 3
+- [ ] e2e: no config file → runs on defaults and says so in `agent.log`
 
 ---
 
@@ -129,10 +132,10 @@ Verify (all passed 22 Oct):
 
 **Verify**
 - [ ] ruff + tests + CI green
-- [ ] Windows: `--max-log-mb 0.05` for 5 minutes → `.1 .2 .3` backups, never more
-- [ ] Ctrl+C and Ctrl+Break both stop cleanly with the final log line; lock file removed
-- [ ] Starting a second agent on the same `--output-dir` refuses with a clear message
-- [ ] Read-only output folder → exit 2 with a clear message
+- [ ] e2e: tiny `--max-log-mb` → `.1 .2 .3` backups appear, never more
+- [ ] e2e: CTRL_BREAK_EVENT (Windows) / SIGTERM (Linux) and Ctrl+C all stop cleanly with the final log line; lock file removed
+- [ ] e2e: a second agent on the same `--output-dir` exits 4 with a clear message
+- [ ] e2e: unwritable output folder → exit 2 with a clear message
 
 ---
 
@@ -164,5 +167,6 @@ Verify (all passed 22 Oct):
 
 ## Working agreement
 - Work directly on `main` in small commits with clear messages; one phase is closed before the next starts.
-- Claude builds and tests in a Linux sandbox; CI covers Windows. The **Windows manual checks are done by the repo owner** on the Windows laptop and reported back before the phase is closed.
+- Claude runs **every** check: unit tests and e2e locally on Linux, then the same suite on GitHub's real Windows machines through CI, reading the results back before closing a phase. No manual checks are left to the repo owner.
+- CI runners are Windows Server 2025, not a laptop; the code paths (psutil, CIM, signals, file locking) are the same. The final `samples/` are produced from a CI Windows run.
 - Nothing is marked done on "it should work" — only on a test or an observed run.
