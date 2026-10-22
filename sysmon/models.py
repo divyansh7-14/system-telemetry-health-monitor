@@ -89,10 +89,15 @@ class InterfaceInfo:
 
 @dataclass(frozen=True)
 class NetworkStats:
-    bytes_sent: int  # all interfaces, since boot
+    # Totals and rates are for ``counted_interface`` (the default-route interface),
+    # so traffic mirrored on virtual adapters (Hyper-V/WSL vEthernet, Azure VF) is
+    # not counted twice. If there is no default route, they are the sum of all
+    # non-loopback interfaces and ``counted_interface`` is None.
+    bytes_sent: int  # since boot
     bytes_recv: int
-    sent_bps: float | None  # bytes/s since the previous cycle; None on the first cycle
+    sent_bps: float | None  # bytes/s since the previous cycle; None if unknown
     recv_bps: float | None
+    counted_interface: str | None
     primary_interface: str | None  # interface used for the default route
     primary_ip: str | None
     interfaces: list[InterfaceInfo] = field(default_factory=list)

@@ -2,8 +2,13 @@
 
 Counters are cumulative since boot. psutil's ``nowrap=True`` (the default) hides
 32-bit counter wrap-around; if a counter still goes backwards (adapter reset or
-removed) the rate for that cycle is reported as None rather than a negative or
-huge number.
+removed), or the counted interface changes (Wi-Fi -> Ethernet), the rate for
+that cycle is None rather than a negative or huge number.
+
+Why totals use one interface: adding up every adapter double-counts traffic that
+is mirrored on a virtual adapter. CI showed this on Azure Linux (an 18.9 MB
+download appeared as 38.8 MB); Hyper-V/WSL "vEthernet" adapters do the same on
+Windows laptops. So totals and rates are taken from the default-route interface.
 """
 
 from __future__ import annotations
@@ -54,32 +59,44 @@ def _is_loopback(name: str, ipv4: list[str], ipv6: list[str]) -> bool:
 class NetworkSampler:
     def __init__(self, clock=time.monotonic) -> None:
         self._clock = clock
-        self._prev: tuple[float, int, int] | None = None
+        # (time, counted interface, bytes_sent, bytes_recv) from the previous sample
+        self._prev: tuple[float, str | None, int, int] | None = None
 
     def sample(self) -> NetworkStats:
         now = self._clock()
-        total = psutil.net_io_counters(pernic=False)
-        sent, recv = (total.bytes_sent, total.bytes_recv) if total else (0, 0)
+        interfaces = collect_interfaces()
+        ip = primary_ip()
+        primary = next((i for i in interfaces if ip and ip in i.ipv4), None)
+
+        if primary is not None and primary.bytes_recv is not None:
+            counted = primary.name
+            sent, recv = primary.bytes_sent or 0, primary.bytes_recv
+        else:
+            counted = None
+            real = [i for i in interfaces if not i.is_loopback and i.bytes_recv is not None]
+            sent = sum(i.bytes_sent or 0 for i in real)
+            recv = sum(i.bytes_recv or 0 for i in real)
+
         sent_bps = recv_bps = None
         if self._prev is not None:
-            then, prev_sent, prev_recv = self._prev
+            then, prev_counted, prev_sent, prev_recv = self._prev
             elapsed = now - then
-            if elapsed > 0 and sent >= prev_sent and recv >= prev_recv:
+            if prev_counted != counted:
+                log.info("network totals now counted on %s", counted or "all interfaces")
+            elif elapsed > 0 and sent >= prev_sent and recv >= prev_recv:
                 sent_bps = round((sent - prev_sent) / elapsed, 1)
                 recv_bps = round((recv - prev_recv) / elapsed, 1)
             else:
                 log.info("network counters went backwards (adapter reset?); rate skipped")
-        self._prev = (now, sent, recv)
+        self._prev = (now, counted, sent, recv)
 
-        interfaces = collect_interfaces()
-        ip = primary_ip()
-        primary = next((i.name for i in interfaces if ip and ip in i.ipv4), None)
         return NetworkStats(
             bytes_sent=sent,
             bytes_recv=recv,
             sent_bps=sent_bps,
             recv_bps=recv_bps,
-            primary_interface=primary,
+            counted_interface=counted,
+            primary_interface=primary.name if primary else None,
             primary_ip=ip,
             interfaces=interfaces,
         )

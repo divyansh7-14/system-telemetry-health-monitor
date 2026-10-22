@@ -532,6 +532,13 @@ def phase2(out: Path, rep: Report) -> None:
     )
     agent_if = next((i for i in net["interfaces"] if i["name"] == net_ref["iface"]), {})
     rep.check(
+        "totals counted once, on the default-route interface",
+        net["counted_interface"] == net_ref["iface"]
+        and net["bytes_recv"] == agent_if.get("bytes_recv"),
+        f"counted on {net['counted_interface']}; total rx {net['bytes_recv']} vs "
+        f"interface rx {agent_if.get('bytes_recv')}",
+    )
+    rep.check(
         "primary MAC matches OS",
         agent_if.get("mac") == net_ref["mac"],
         f"{agent_if.get('mac')} vs {net_ref['mac']}",
@@ -567,8 +574,8 @@ def phase2(out: Path, rep: Report) -> None:
         # A cycle that falls inside the download sees at least half its average speed.
         needed = 0.5 * downloaded / max(dl_secs, interval)
         rep.check(
-            "download visible in totals and rate",
-            received >= downloaded and max(rates) >= needed,
+            "download counted once in totals, and visible in rate",
+            downloaded <= received <= downloaded * 1.25 + 2 * 1024**2 and max(rates) >= needed,
             f"downloaded {downloaded} B in {dl_secs:.1f}s; agent saw +{received} B, "
             f"peak rx {max(rates):.0f} B/s (needed {needed:.0f})",
         )

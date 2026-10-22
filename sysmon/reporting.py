@@ -93,4 +93,5 @@ def format_network(s: Snapshot) -> str:
             continue
         ips = ", ".join(i.ipv4 + i.ipv6) or "no IP"
         lines.append(f"  {i.name[:14]:<14}: {i.mac or 'no MAC'}  {ips}")
+    lines.append(f"  Traffic counted on: {n.counted_interface or 'all non-loopback interfaces'}")
     return "\n".join(lines)

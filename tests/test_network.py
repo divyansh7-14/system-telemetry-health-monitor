@@ -18,7 +18,13 @@ def io(sent, recv):
 
 @pytest.fixture
 def fake_net(monkeypatch):
-    state = {"total": io(1_000, 5_000)}
+    state = {
+        "nics": {
+            "Ethernet": io(1_000, 5_000),
+            "Loopback Pseudo-Interface 1": io(7_000, 7_000),
+            "vEthernet (WSL)": io(1_000, 5_000),  # mirrors Ethernet's traffic
+        }
+    }
     addrs = {
         "Ethernet": [
             Addr(psutil.AF_LINK, "00-15-5d-AA-bb-01", None, None, None),
@@ -30,17 +36,18 @@ def fake_net(monkeypatch):
             Addr(socket.AF_INET6, "::1", None, None, None),
         ],
         "vEthernet (down)": [Addr(psutil.AF_LINK, "00:00:00:00:00:00", None, None, None)],
+        "vEthernet (WSL)": [Addr(socket.AF_INET, "172.30.0.1", "255.255.240.0", None, None)],
     }
     stats = {
         "Ethernet": Stat(True, 2, 1000, 1500),
         "Loopback Pseudo-Interface 1": Stat(True, 0, 1073, 1500),
         "vEthernet (down)": Stat(False, 0, 0, 1500),
+        "vEthernet (WSL)": Stat(True, 2, 10000, 1500),
     }
 
     def counters(pernic=False):
-        if pernic:
-            return {"Ethernet": io(900, 4_800)}
-        return state["total"]
+        assert pernic, "totals must come from per-NIC counters"
+        return state["nics"]
 
     monkeypatch.setattr(psutil, "net_if_addrs", lambda: addrs)
     monkeypatch.setattr(psutil, "net_if_stats", lambda: stats)
@@ -71,11 +78,18 @@ def test_interfaces_ip_mac_and_flags(fake_net):
     assert eth.ipv4 == ["10.1.0.4"]
     assert eth.ipv6 == ["fe80::1234"]  # zone id stripped
     assert eth.is_up and not eth.is_loopback and eth.speed_mbps == 1000
-    assert (eth.bytes_sent, eth.bytes_recv) == (900, 4_800)
+    assert (eth.bytes_sent, eth.bytes_recv) == (1_000, 5_000)
     assert by_name["Loopback Pseudo-Interface 1"].is_loopback
     down = by_name["vEthernet (down)"]
     assert not down.is_up and down.mac is None and down.bytes_recv is None
     assert stats.primary_ip == "10.1.0.4" and stats.primary_interface == "Ethernet"
+
+
+def test_totals_count_primary_interface_once(fake_net):
+    """Mirrored traffic on vEthernet and loopback must not be added to the totals."""
+    stats = NetworkSampler(clock=lambda: 0.0).sample()
+    assert stats.counted_interface == "Ethernet"
+    assert (stats.bytes_sent, stats.bytes_recv) == (1_000, 5_000)
 
 
 def test_rates_none_first_then_bytes_per_second(fake_net):
@@ -85,7 +99,7 @@ def test_rates_none_first_then_bytes_per_second(fake_net):
     assert first.sent_bps is None and first.recv_bps is None
     assert (first.bytes_sent, first.bytes_recv) == (1_000, 5_000)
     t[0] += 10
-    fake_net["total"] = io(2_000, 105_000)
+    fake_net["nics"]["Ethernet"] = io(2_000, 105_000)
     second = sampler.sample()
     assert second.sent_bps == 100.0 and second.recv_bps == 10_000.0
 
@@ -95,17 +109,34 @@ def test_counter_reset_gives_no_rate_not_negative(fake_net):
     sampler = NetworkSampler(clock=lambda: t[0])
     sampler.sample()
     t[0] += 10
-    fake_net["total"] = io(10, 10)  # adapter reset
+    fake_net["nics"]["Ethernet"] = io(10, 10)  # adapter reset
     assert sampler.sample().recv_bps is None
     t[0] += 10
-    fake_net["total"] = io(1_010, 2_010)  # recovers from the new baseline
+    fake_net["nics"]["Ethernet"] = io(1_010, 2_010)  # recovers from the new baseline
     assert sampler.sample().recv_bps == 200.0
 
 
-def test_offline_machine_has_no_primary(fake_net, monkeypatch):
+def test_offline_machine_sums_non_loopback_interfaces(fake_net, monkeypatch):
     monkeypatch.setattr(network, "primary_ip", lambda: None)
     stats = NetworkSampler().sample()
     assert stats.primary_ip is None and stats.primary_interface is None
+    assert stats.counted_interface is None
+    assert stats.bytes_recv == 10_000  # Ethernet + vEthernet, loopback excluded
+
+
+def test_switching_interface_skips_one_rate(fake_net, monkeypatch):
+    """Wi-Fi -> Ethernet: counters jump to another adapter; no bogus spike."""
+    t = [0.0]
+    sampler = NetworkSampler(clock=lambda: t[0])
+    sampler.sample()
+    monkeypatch.setattr(network, "primary_ip", lambda: "172.30.0.1")
+    fake_net["nics"]["vEthernet (WSL)"] = io(1_000, 900_000_000)
+    t[0] += 10
+    switched = sampler.sample()
+    assert switched.counted_interface == "vEthernet (WSL)" and switched.recv_bps is None
+    t[0] += 10
+    fake_net["nics"]["vEthernet (WSL)"] = io(1_000, 900_010_000)
+    assert sampler.sample().recv_bps == 1_000.0
 
 
 def test_primary_ip_offline_returns_none(monkeypatch):

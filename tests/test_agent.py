@@ -43,7 +43,9 @@ def fake_agent(tmp_path, monkeypatch):
 
     monkeypatch.setattr(a.cpu, "sample", cpu_sample)
     monkeypatch.setattr(a.processes, "sample", lambda: TopProcesses([], [], 0))
-    monkeypatch.setattr(a.network, "sample", lambda: NetworkStats(1, 2, None, None, None, None, []))
+    monkeypatch.setattr(
+        a.network, "sample", lambda: NetworkStats(1, 2, None, None, None, None, None, [])
+    )
     monkeypatch.setattr(agent_mod, "collect_memory", lambda: None)
     monkeypatch.setattr(agent_mod, "collect_disks", lambda warned: [])
     a.clock_obj = clock
