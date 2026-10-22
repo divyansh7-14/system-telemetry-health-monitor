@@ -498,11 +498,27 @@ def phase2(out: Path, rep: Report) -> None:
         hog_row is not None and within(hog_row["memory_rss_bytes"], HOG_BYTES, rel=0.10),
         f"rank={rank} rss={hog_row and hog_row['memory_rss_bytes']}",
     )
-    rep.check(
-        "process names present",
-        all(p["name"] for s in final for p in s["top_processes"]["by_cpu"]),
-        "",
-    )
+    unnamed = [
+        (s["cycle"], p["pid"], p["cpu_percent"], p["memory_rss_bytes"])
+        for s in final
+        for p in s["top_processes"]["by_cpu"] + s["top_processes"]["by_memory"]
+        if not p["name"]
+    ]
+    rep.check("process names present", not unnamed, f"(cycle, pid, cpu, rss) unnamed: {unnamed}")
+    if IS_WINDOWS:
+        # Diagnose: which processes does psutil fail to name, and why?
+        diag = []
+        for proc in psutil.process_iter(["pid", "name"], ad_value=None):
+            if proc.info["name"]:
+                continue
+            row = {"pid": proc.pid}
+            for attr in ("name", "exe", "status", "ppid"):
+                try:
+                    row[attr] = getattr(proc, attr)()
+                except psutil.Error as exc:
+                    row[attr] = type(exc).__name__
+            diag.append(row)
+        rep.info(f"processes psutil cannot name: {diag}")
 
     # --- network identity and counters
     net = final[-1]["network"]
