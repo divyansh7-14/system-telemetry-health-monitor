@@ -6,7 +6,7 @@
 | Deadline | **28 Oct 2026** — completed code, README with setup/run instructions, sample outputs |
 | Language | Python 3.10+ |
 | Primary demo OS | Windows 10/11 (CI also runs on Ubuntu) |
-| Status | Phases 0, 1 and 2 done — see [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) |
+| Status | Phases 0–3 done — see [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) |
 
 ## 1. Problem
 
@@ -36,7 +36,7 @@ in a config file, and writes structured reports and alerts so a problem is visib
 |---|---|---|
 | 1. Host discovery & static metrics | FR-1, FR-2 | 1 ✅ |
 | 2. Continuous polling & process inspection | FR-3, FR-4, FR-5, FR-6 | 2 ✅ |
-| 3. Health rules & alert engine | FR-7 … FR-11 | 3 |
+| 3. Health rules & alert engine | FR-7 … FR-11 | 3 ✅ |
 | 4. CLI flags & log management, error handling | FR-12 … FR-16 | 1 (CLI) ✅ / 4 |
 | Deliverables: README, sample outputs, regular commits | FR-17, FR-18 | 5 |
 
@@ -53,10 +53,10 @@ in a config file, and writes structured reports and alerts so a problem is visib
 - **FR-6** Each cycle appends one JSON object to `metrics.jsonl` (schema in §7) and prints a short console summary.
 
 ### Rules & alerts (Phase 3)
-- **FR-7** Load thresholds from YAML or JSON (chosen by extension). Missing file → built-in defaults with a log line saying so. Invalid file → clear error and exit code 4; the agent never starts with a half-understood config.
-- **FR-8** Supported rules (names follow the brief): `cpu_max`, `memory_max`, `swap_max`, `disk_min_free` (checked per disk), `process_cpu_max`, `process_memory_max`. Each takes `warning` and `critical` levels; a bare number (e.g. `cpu_max: 85`) means the critical level only.
+- **FR-7** Load thresholds from YAML or JSON (chosen by extension). No `--threshold-config` → built-in defaults (identical to `config/config.yaml`) with a log line saying so. A named file that is missing, unreadable or invalid → one-line error naming the file and exit code 4; the agent never starts with a half-understood config. Unknown keys are warnings with a "did you mean" hint.
+- **FR-8** Supported rules (names follow the brief): `cpu_max`, `memory_max`, `swap_max`, `disk_min_free` (checked per disk), `process_cpu_max`, `process_memory_max`. Each takes `warning` and `critical` levels; a bare number (e.g. `cpu_max: 85`) means the critical level only. Values may be written as in the brief (`cpu_max: 85%`). `null`/`off` disables a rule. Limits are strict ("alert if CPU > 85%"; for `disk_min_free`, free < limit).
 - **FR-9** Each cycle produces a status per check and an overall host status = the worst check.
-- **FR-10** Anti-flapping: a check becomes WARNING/CRITICAL only after `consecutive` breaching cycles in a row (default 2), and returns to OK only after the value is back inside the limit by `recovery_margin` points (default 5). This stops a value hovering at 85 % from flooding the log.
+- **FR-10** Anti-flapping: a check rises to WARNING/CRITICAL only after `consecutive` breaching cycles in a row (default 2), to the lowest level seen in that window; it falls only once the value is back inside the limit by `recovery_margin` points (default 5), and then at once. This stops a value hovering at 85 % from flooding the log. A disk or process that disappears while in breach is cleared with a note; a collector that fails keeps the last status instead of clearing it.
 - **FR-11** Write to `alerts.log` on every state change (OK→WARNING, WARNING→CRITICAL, CRITICAL→OK, …), and repeat a "still CRITICAL/WARNING" line every `repeat_every` cycles (default 10) while a breach lasts. Line format in §7.
 
 ### CLI, logs & resilience (Phase 1 CLI done; rest Phase 4)

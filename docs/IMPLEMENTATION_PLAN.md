@@ -26,7 +26,7 @@ start the next phase.
 | 0 | Skeleton, packaging, CI | ✅ done |
 | 1 | Host discovery + baseline CPU/RAM/disk | ✅ done — re-reviewed 22 Oct, verified on Windows Server 2025 + Linux, Py 3.10/3.12/3.14 (35 unit tests, 21 e2e checks) |
 | 2 | Polling loop, top processes, network, `metrics.jsonl` | ✅ done 22 Oct — verified on Windows + Linux (68 unit tests, 43 e2e checks on Windows) |
-| 3 | Config loader, rules engine, statuses, `alerts.log` | Sat 24 Oct |
+| 3 | Config loader, rules engine, statuses, `alerts.log` | ✅ done 25 Oct — verified on Windows + Linux (136 unit tests, 70 e2e checks on Windows) |
 | 4 | Log rotation, graceful shutdown, error handling, lock file | Sun 25 Oct |
 | 5 | Windows demo, `samples/`, full README, `v1.0.0` tag | Mon 26 – Tue 27 Oct |
 | — | Buffer / review | Wed 28 Oct (deadline) |
@@ -107,32 +107,32 @@ New verification (CI run on commit `148e79e`, 6/6 jobs, 55/55 checks on each Win
 
 ---
 
-## Phase 3 — Health rules & alert engine  *(Brief task 3)*
+## Phase 3 — Health rules & alert engine ✅  *(Brief task 3)*
 
-**Build**
-1. `config.py`
-   - `load_config(path)`: `.yaml/.yml` → `yaml.safe_load`, `.json` → `json.load`, other → error.
-   - Validate: numbers in 0–100, `warning` must be "less severe" than `critical` (below it for `*_max`, above it for `*_min_free`), interval 10–30, unknown keys → warning.
-   - Bare number → critical only. Merge: defaults ← file ← CLI flags.
-   - `ConfigError` → message on stderr, exit 4.
-2. `config/config.yaml` with the defaults from PRD §7, plus `config/config.example.json`.
-3. `rules.py`
-   - `evaluate(snapshot, thresholds) -> list[Check]` — pure function; `disk_min_free` makes one check per disk, process rules one check per offending process.
-   - `AlertState` keyed by `(rule, target)`: consecutive counter, current status, cycles in status → applies `consecutive`, `recovery_margin`, `repeat_every`, and returns the events to log.
-   - Overall status = worst check.
-4. Alert writer → `alerts.log` in the PRD §7 format; status added to `metrics.jsonl` and console (`[OK]`, `[WARNING]`, `[CRITICAL]`).
+Built:
+1. `config.py` — YAML/JSON by extension; built-in defaults identical to `config/config.yaml`
+   (tested); brief-style `85%` values; bare number = critical only; `null`/`off` disables a rule;
+   unknown keys warn with "did you mean"; wrong types, ranges or warning/critical order are
+   one-line errors naming the file (exit 4); a named file that is missing is an error, never
+   silent defaults; UTF-8 BOM (Notepad) tolerated; precedence defaults ← file ← CLI flags.
+2. `config/config.yaml` (commented) and `config/config.example.json` (identical, tested).
+3. `rules.py` — targets: cpu, memory, swap (skipped if no swap), every disk, top processes;
+   strict limits; raise after `consecutive` cycles to the lowest level in the window; clear
+   with `recovery_margin` hysteresis; "still X (N cycles)" every `repeat_every`; vanished
+   disk/process cleared with a note; failed collector keeps state; overall = worst check.
+4. `logs.py` — `LineWriter` shared by `metrics.jsonl` and `alerts.log` (errors once, never fatal,
+   partial-line protection). `metrics.jsonl` gains `status`, `checks`, `alerts`; console shows
+   the status on each cycle line, `ALERT` lines, and the active thresholds at start-up.
 
-**Tests**
-- Config: valid YAML and JSON give identical results; each kind of invalid file → `ConfigError` with a helpful message; CLI overrides file.
-- Rules: boundary values (exactly 85 vs 85.1), direction of `disk_min_free`, worst-of status.
-- Anti-flapping table test: sequence 80, 90, 84, 90, 90, 70 with consecutive=2 → exact expected event list.
-- Repeat line after `repeat_every` cycles; recovery only below `limit - margin`.
+Tests: 136 unit tests (config 34, rules 21, plus agent/CLI integration).
 
-**Verify**
-- [ ] ruff + tests + CI green
-- [ ] e2e: with a test config and a CPU burn, `alerts.log` gets OK→WARNING→CRITICAL then a recovery line after the burn stops
-- [ ] e2e: broken configs (typo, `critical < warning`, bad YAML, bad JSON) → one clear sentence and exit 4
-- [ ] e2e: no config file → runs on defaults and says so in `agent.log`
+Verify (all passed 25 Oct, CI run on commit `a4940a6`, 6/6 jobs, 70/70 checks per Windows job, 56/56 per Linux job):
+- [x] ruff + tests + CI green on Windows + Linux, Py 3.10 / 3.12 / 3.14
+- [x] e2e: staged CPU load (½ of the cores, then all, then none) gives exactly OK→WARNING (cycle 3), still WARNING (4), WARNING→CRITICAL (5), CRITICAL→OK (6) — identical on all six machines — in `metrics.jsonl`, `alerts.log` (well-formed lines) and the console
+- [x] e2e: broken configs (critical below warning, broken YAML, broken JSON, not a number, wrong file type, missing file) → exit 4 with one clear line, no traceback
+- [x] e2e: typo in a rule name → runs, warns "did you mean 'thresholds.cpu_max'"
+- [x] e2e: brief-style `cpu_max: 85%` / `disk_min_free: 15%` understood; shipped `config/config.yaml` runs clean
+- [x] e2e: no config → runs on built-in thresholds and says so (in `agent.log` from Phase 4; on the console now)
 
 ---
 
@@ -183,8 +183,8 @@ New verification (CI run on commit `148e79e`, 6/6 jobs, 55/55 checks on each Win
 |---|---|---|
 | FR-1, FR-2 | 1 | ✅ |
 | FR-3 … FR-6 | 2 | ✅ |
-| FR-7 … FR-11 | 3 | ☐ |
-| FR-12 | 1 (flags) / 2 (`--interval`, `--top-n`, `--once`) / 3 (precedence) | ◐ |
+| FR-7 … FR-11 | 3 | ✅ |
+| FR-12 | 1 (flags) / 2 (`--interval`, `--top-n`, `--once`) / 3 (`--threshold-config`, precedence) / 4 (log flags) | ◐ |
 | FR-13 … FR-16 | 4 | ☐ |
 | FR-17, FR-18 | 5 | ☐ |
 | NFR-1 … NFR-5 | checked in every phase | ◐ |

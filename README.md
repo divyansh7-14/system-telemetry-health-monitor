@@ -2,7 +2,7 @@
 
 Cross-platform Python agent that monitors CPU, RAM, disk, network and processes, checks them against configurable thresholds, and logs OK / WARNING / CRITICAL alerts.
 
-> **Status:** in development — Phase 2 complete: continuous polling of CPU, memory, disk, network and top processes into `metrics.jsonl`. Thresholds and alerts arrive in Phase 3. See [docs/PRD.md](docs/PRD.md) and [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md). Full documentation arrives with v1.0.0.
+> **Status:** in development — Phase 3 complete: continuous polling of CPU, memory, disk, network and top processes, checked against configurable thresholds with OK / WARNING / CRITICAL alerts in `alerts.log`. Log rotation and background stop arrive in Phase 4. See [docs/PRD.md](docs/PRD.md) and [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md). Full documentation arrives with v1.0.0.
 
 ## Quick start
 
@@ -18,9 +18,10 @@ pip install -r requirements.txt
 python -m sysmon --help
 python -m sysmon --interval 10          # poll every 10 s until Ctrl+C
 python -m sysmon --once                 # one snapshot and exit
+python -m sysmon --threshold-config config/config.yaml   # your own limits (YAML or JSON)
 ```
 
-Output goes to `./logs/` (`host_info.json`, `metrics.jsonl`, one JSON line per cycle).
+Output goes to `./logs/`: `host_info.json`, `metrics.jsonl` (one JSON line per cycle, with its status and checks) and `alerts.log` (one line per alert). Edit `config/config.yaml` to change the limits; without `--threshold-config` the same values are built in.
 
 ## Development
 
