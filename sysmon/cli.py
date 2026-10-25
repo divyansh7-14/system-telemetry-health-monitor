@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from sysmon import __version__
@@ -216,6 +217,10 @@ def _run(args: argparse.Namespace) -> int:
     )
     if config.source is None:
         log.info("no --threshold-config given; using built-in thresholds")
+    if args.once:
+        # A single reading cannot last N cycles: judge it as it is, or --once
+        # would report OK for a disk that is already full.
+        config = replace(config, alerting=replace(config.alerting, consecutive=1))
 
     try:
         out_dir = prepare_output_dir(args.output_dir)

@@ -642,6 +642,7 @@ def phase3(out: Path, rep: Report) -> None:
         "broken JSON": ("bad3.json", '{"thresholds": {"cpu_max": 85,}}'),
         "not a number": ("bad4.yaml", "thresholds:\n  cpu_max: high\n"),
         "wrong file type": ("bad5.txt", "interval: 15\n"),
+        "setting written twice": ("bad6.yaml", "thresholds:\n  cpu_max: 50\n  cpu_max: 95\n"),
     }
     for label, (name, text) in cases.items():
         (d / name).write_text(text, encoding="utf-8")
@@ -683,6 +684,28 @@ def phase3(out: Path, rep: Report) -> None:
         and "cpu_max            : CRITICAL > 85%" in res.stdout
         and "disk_min_free      : CRITICAL < 15%" in res.stdout,
         f"exit={res.returncode}",
+    )
+    # --once must judge its single reading at once (no "2 cycles in a row"):
+    # every real disk has less than 99.5 % free, so this must be CRITICAL now.
+    (d / "strict.yaml").write_text(
+        "thresholds:\n  disk_min_free: {warning: 99.9, critical: 99.5}\n", encoding="utf-8"
+    )
+    res = run(
+        py + ["--once", "--output-dir", str(d / "o"), "--threshold-config", str(d / "strict.yaml")]
+    )
+    once = _read_snapshots(d / "o" / "metrics.jsonl")
+    disk_alerts = [
+        a["note"] for a in (once[0]["alerts"] if once else []) if a["rule"] == "disk_min_free"
+    ]
+    rep.check(
+        "--once reports a real breach immediately (CRITICAL + alert line)",
+        res.returncode == 0
+        and once
+        and once[0]["status"] == "CRITICAL"
+        and disk_alerts
+        and set(disk_alerts) == {"OK->CRITICAL"}
+        and "ALERT CRITICAL disk_min_free" in res.stdout,
+        f"status={once[0]['status'] if once else None} alerts={disk_alerts}",
     )
     shipped = Path(__file__).resolve().parents[1] / "config" / "config.yaml"
     res = run(py + ["--once", "--output-dir", str(d / "s"), "--threshold-config", str(shipped)])

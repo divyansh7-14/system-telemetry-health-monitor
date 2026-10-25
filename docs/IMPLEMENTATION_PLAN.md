@@ -134,6 +134,14 @@ Verify (all passed 25 Oct, CI run on commit `a4940a6`, 6/6 jobs, 70/70 checks pe
 - [x] e2e: brief-style `cpu_max: 85%` / `disk_min_free: 15%` understood; shipped `config/config.yaml` runs clean
 - [x] e2e: no config → runs on built-in thresholds and says so (in `agent.log` from Phase 4; on the console now)
 
+Re-review of Phase 3 (25 Oct, afternoon) — each bug reproduced first, then fixed and covered by tests:
+- `--once` reported **OK for a disk at 3 % free**: one reading can never last 2 cycles. `--once` now judges its reading immediately (e2e: real disks with a strict rule → CRITICAL at once).
+- With small limits (e.g. `cpu_max` warning 3) the 5-point recovery margin meant the value had to drop below 0 % — the alert **could never clear**. The margin now shrinks to at most half the room left near 0 % / 100 %.
+- A transient failure listing disks returned "no disks", which **cleared a real CRITICAL disk alert** ("disk no longer present"). The failure now counts as a failed collector (state kept).
+- Any target missing for one cycle (unreadable disk, process briefly out of the top list) cleared instantly — the flapping anti-flapping exists to prevent. A vanished target now keeps its status until missing for `consecutive` cycles.
+- A setting written twice in YAML/JSON was **silently overwritten** by the last one. Now an error naming both lines.
+- `interval: 15s` was told to write `'85%'`. Non-percentage settings now say "expected a number".
+
 ---
 
 ## Phase 4 — Log management, shutdown, error handling  *(Brief task 4)*

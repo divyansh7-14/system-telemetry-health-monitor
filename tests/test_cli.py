@@ -222,3 +222,19 @@ def test_console_that_breaks_is_silenced_once(tmp_path, fast, monkeypatch, caplo
     assert main(["--once", "--output-dir", str(tmp_path)]) == 0
     assert caplog.text.count("console output is unavailable") == 1
     assert (tmp_path / "metrics.jsonl").exists()
+
+
+def test_once_judges_the_single_reading_immediately(tmp_path, fast, monkeypatch):
+    """--once has one cycle, so 'must last 2 cycles' would hide a full disk."""
+    import json
+
+    from sysmon import agent as agent_mod
+    from sysmon.models import DiskStats
+
+    full = DiskStats("d", "C:\\", "NTFS", 100, 97, 3, 97.0, 3.0)
+    monkeypatch.setattr(agent_mod, "collect_disks", lambda warned: [full])
+    assert main(["--once", "--output-dir", str(tmp_path)]) == 0
+    snap = json.loads((tmp_path / "metrics.jsonl").read_text(encoding="utf-8"))
+    disk = [c for c in snap["checks"] if c["rule"] == "disk_min_free"][0]
+    assert disk["status"] == "CRITICAL" and snap["status"] == "CRITICAL"
+    assert [a["note"] for a in snap["alerts"] if a["rule"] == "disk_min_free"] == ["OK->CRITICAL"]

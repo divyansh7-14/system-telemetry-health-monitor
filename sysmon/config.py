@@ -129,14 +129,22 @@ def load_config(path: str | Path | None) -> Config:
 
     if suffix == ".json":
         try:
-            data = json.loads(text) if text.strip() else None
+            data = (
+                json.loads(text, object_pairs_hook=_no_duplicate_json_keys)
+                if text.strip()
+                else None
+            )
+        except ConfigError as exc:
+            raise ConfigError(f"{p}: {exc}") from None
         except json.JSONDecodeError as exc:
             raise ConfigError(
                 f"{p}: invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"
             ) from None
     else:
         try:
-            data = yaml.safe_load(text)
+            data = yaml.load(text, Loader=_StrictLoader)  # noqa: S506 - a SafeLoader subclass
+        except _DuplicateKey as exc:
+            raise ConfigError(f"{p}: {exc}") from None
         except yaml.YAMLError as exc:
             mark = getattr(exc, "problem_mark", None)
             where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
@@ -178,7 +186,13 @@ def parse_config(data: Any, source: str | None = None, warnings: list[str] | Non
     alerting = AlertingConfig(
         consecutive=_int(alerting, "consecutive", AlertingConfig.consecutive, 1, 20, "alerting."),
         recovery_margin=_number(
-            alerting, "recovery_margin", AlertingConfig.recovery_margin, 0, 50, "alerting."
+            alerting,
+            "recovery_margin",
+            AlertingConfig.recovery_margin,
+            0,
+            50,
+            "alerting.",
+            percent=True,
         ),
         repeat_every=_int(
             alerting, "repeat_every", AlertingConfig.repeat_every, 0, 10_000, "alerting."
@@ -202,6 +216,36 @@ def parse_config(data: Any, source: str | None = None, warnings: list[str] | Non
     )
 
 
+# ------------------------------------------------------- duplicate settings
+class _DuplicateKey(Exception):
+    pass
+
+
+class _StrictLoader(yaml.SafeLoader):
+    """SafeLoader that refuses a setting written twice (PyYAML keeps the last one silently)."""
+
+    def construct_mapping(self, node, deep=False):
+        seen: dict = {}
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise _DuplicateKey(
+                    f"'{key}' is set twice (lines {seen[key]} and {key_node.start_mark.line + 1}); "
+                    "remove one"
+                )
+            seen[key] = key_node.start_mark.line + 1
+        return super().construct_mapping(node, deep=deep)
+
+
+def _no_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict:
+    out: dict = {}
+    for key, value in pairs:
+        if key in out:
+            raise ConfigError(f"'{key}' is set twice in the same object; remove one")
+        out[key] = value
+    return out
+
+
 # ---------------------------------------------------------------- validation
 def _warn_unknown(data: dict, known: set[str], prefix: str, warnings: list[str]) -> None:
     for key in data:
@@ -222,27 +266,30 @@ def _section(data: dict, name: str, cls: type, warnings: list[str]) -> dict:
     return raw
 
 
-def _as_number(value: Any, where: str) -> float:
-    """Accept 85, 85.5 or '85%' (the brief writes thresholds as `cpu_max: 85%`)."""
+def _as_number(value: Any, where: str, percent: bool = True) -> float:
+    """A number. Percentages may be written '85%' (the brief writes `cpu_max: 85%`)."""
     if isinstance(value, bool):  # YAML yes/no/true/false are not numbers
         raise ConfigError(f"{where}: expected a number, got {value!r}")
     if isinstance(value, str):
-        text = value.strip().removesuffix("%").strip()
+        text = value.strip()
+        if percent:
+            text = text.removesuffix("%").strip()
         try:
             value = float(text)
         except ValueError:
-            raise ConfigError(
-                f"{where}: expected a number like 85 or '85%', got {value!r}"
-            ) from None
+            example = "a number like 85 or '85%'" if percent else "a number"
+            raise ConfigError(f"{where}: expected {example}, got {value!r}") from None
     if not isinstance(value, int | float) or not math.isfinite(value):
         raise ConfigError(f"{where}: expected a number, got {value!r}")
     return float(value)
 
 
-def _number(data: dict, key: str, default: float, lo: float, hi: float, prefix: str = "") -> float:
+def _number(
+    data: dict, key: str, default: float, lo: float, hi: float, prefix: str = "", percent=False
+) -> float:
     if key not in data or data[key] is None:
         return default
-    value = _as_number(data[key], prefix + key)
+    value = _as_number(data[key], prefix + key, percent)
     if not lo <= value <= hi:
         raise ConfigError(f"{prefix}{key}: must be between {lo:g} and {hi:g}, got {value:g}")
     return value

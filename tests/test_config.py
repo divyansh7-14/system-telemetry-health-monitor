@@ -184,3 +184,34 @@ def test_value_errors_name_the_file(tmp_path):
     with pytest.raises(ConfigError) as exc:
         load_config(p)
     assert str(exc.value).startswith(f"{p}: interval: must be between 10 and 30")
+
+
+@pytest.mark.parametrize(
+    ("name", "text", "message"),
+    [
+        (
+            "d.yaml",
+            "thresholds:\n  cpu_max: 50\n  memory_max: 80\n  cpu_max: 95\n",
+            "'cpu_max' is set twice (lines 2 and 4)",
+        ),
+        ("d.json", '{"interval": 10, "interval": 30}', "'interval' is set twice"),
+    ],
+)
+def test_setting_written_twice_is_an_error(tmp_path, name, text, message):
+    p = write(tmp_path, name, text)
+    with pytest.raises(ConfigError) as exc:
+        load_config(p)
+    assert str(exc.value).startswith(str(p)) and message in str(exc.value)
+
+
+def test_non_percent_settings_do_not_suggest_percent(tmp_path):
+    with pytest.raises(ConfigError) as exc:
+        load_config(write(tmp_path, "c.yaml", "interval: 15s\n"))
+    assert "expected a number, got '15s'" in str(exc.value)
+    with pytest.raises(ConfigError):
+        load_config(write(tmp_path, "c2.yaml", "interval: 15%\n"))
+
+
+def test_recovery_margin_may_be_written_as_percent(tmp_path):
+    cfg = load_config(write(tmp_path, "c.yaml", "alerting: {recovery_margin: 3%}\n"))
+    assert cfg.alerting.recovery_margin == 3.0

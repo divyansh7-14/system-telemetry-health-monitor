@@ -99,3 +99,15 @@ def test_linux_load_average_available_immediately(monkeypatch):
     )
     monkeypatch.setattr(psutil, "getloadavg", lambda: (1.0, 2.0, 3.0))
     assert CpuSampler().sample().load_average == [1.0, 2.0, 3.0]
+
+
+def test_partition_listing_failure_is_raised_not_hidden(monkeypatch):
+    """Returning [] would look like 'every disk vanished' and clear real alerts."""
+    import pytest
+
+    def boom(all=False):
+        raise OSError("transient")
+
+    monkeypatch.setattr(psutil, "disk_partitions", boom)
+    with pytest.raises(OSError):
+        collect_disks()

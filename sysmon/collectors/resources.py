@@ -109,11 +109,10 @@ def collect_disks(already_warned: set[str] | None = None) -> list[DiskStats]:
     warned = already_warned if already_warned is not None else set()
     disks: list[DiskStats] = []
     seen: set[str] = set()
-    try:
-        partitions = psutil.disk_partitions(all=False)
-    except OSError as exc:
-        log.error("could not list disk partitions: %s", exc)
-        return disks
+    # If the partition list itself cannot be read, let the error propagate: the
+    # agent records a failed "disks" collector and keeps disk alerts as they were,
+    # instead of reporting every disk as gone (which would clear real alerts).
+    partitions = psutil.disk_partitions(all=False)
 
     for part in partitions:
         if part.mountpoint in seen:

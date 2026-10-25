@@ -143,8 +143,12 @@ def test_removed_disk_in_breach_is_cleared_with_note():
     eng = engine(only=["disk_min_free"])
     for n in (1, 2):
         eng.evaluate(snap(disks=[("E:\\", 5.0)], n=n))
-    _, _, events = eng.evaluate(snap(disks=[], n=3))
+    status, checks, events = eng.evaluate(snap(disks=[], n=3))
+    assert events == [] and status == "CRITICAL"  # one missing cycle: maybe a hiccup
+    assert [(c.target, c.value, c.status) for c in checks] == [("E:\\", None, "CRITICAL")]
+    status, _, events = eng.evaluate(snap(disks=[], n=4))
     assert [e.note for e in events] == ["CRITICAL->OK (disk no longer present)"]
+    assert status == "OK"
 
 
 def test_collector_failure_keeps_state_and_does_not_clear():
@@ -166,6 +170,8 @@ def test_process_rules_only_list_breaching_processes():
     assert [(c.target, c.status) for c in checks] == [("busy.exe[10]", "CRITICAL")]
     assert [e.note for e in events] == ["OK->CRITICAL"]
     _, _, events = eng.evaluate(snap(procs=procs[1:], n=3))  # busy.exe exits
+    assert events == []
+    _, _, events = eng.evaluate(snap(procs=procs[1:], n=4))
     assert [e.note for e in events] == ["CRITICAL->OK (process ended or left the top list)"]
 
 
@@ -201,3 +207,42 @@ def test_alert_line_format(note, value, expected):
     line = e.line()
     assert line.startswith("2026-10-25T10:00:00+05:30 WARNING  cpu_max            cpu ")
     assert expected in line
+
+
+# ------------------------------------------------------ re-review regressions
+def test_one_cycle_disk_read_hiccup_does_not_clear_a_real_alert():
+    eng = engine(only=["disk_min_free"])
+    seq = [[("C:\\", 5.0)], [("C:\\", 5.0)], [], [("C:\\", 5.0)], [("C:\\", 5.0)]]
+    notes = []
+    for n, disks in enumerate(seq, start=1):
+        _, _, events = eng.evaluate(snap(disks=disks, n=n))
+        notes += [e.note for e in events]
+    assert notes == ["OK->CRITICAL"]  # raised once, never falsely cleared
+
+
+def test_failed_partition_listing_keeps_disk_alerts():
+    eng = engine(only=["disk_min_free"])
+    for n in (1, 2):
+        eng.evaluate(snap(disks=[("C:\\", 5.0)], n=n))
+    for n in (3, 4, 5):  # collector failing for several cycles
+        status, _, events = eng.evaluate(snap(disks=None, errors=["disks: OSError: x"], n=n))
+        assert events == [] and status == "CRITICAL"
+
+
+@pytest.mark.parametrize(
+    ("t", "higher", "value", "cleared_level"),
+    [
+        (Threshold(3, 4), True, 1.5, 0),  # margin 5 shrinks to 1.5: clears at <= 1.5
+        (Threshold(3, 4), True, 1.6, 1),
+        (Threshold(75, 85), True, 70.0, 0),  # normal limits keep the full 5-point margin
+        (Threshold(98, 99), False, 99.5, 0),  # lower-is-worse near 100 can still clear
+    ],
+)
+def test_recovery_margin_shrinks_near_0_and_100(t, higher, value, cleared_level):
+    assert level(value, t, higher, margin=5) == cleared_level
+
+
+def test_small_limit_breach_can_clear():
+    eng = engine(cpu_max=Threshold(3, 4))
+    _, events = run(eng, [10, 10, 1.0])
+    assert events == [(2, "OK->CRITICAL"), (3, "CRITICAL->OK")]

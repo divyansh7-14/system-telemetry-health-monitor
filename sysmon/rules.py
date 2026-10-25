@@ -12,9 +12,13 @@ is the raw level after anti-flapping:
 * Clearing (hysteresis): the status falls only once the value is
   ``recovery_margin`` points back inside the limit, and then immediately.
   A value hovering at the limit therefore cannot flap between two states.
+  For limits close to 0 % or 100 % the margin shrinks to at most half the
+  room left, so a breach can always clear (cpu_max: 3 still clears at <= 1.5).
 * While a breach lasts, a reminder is logged every ``repeat_every`` cycles.
 * A target that disappears (process exited, USB disk removed) while in breach
-  is cleared with a note, so alerts.log never leaves a breach open forever.
+  keeps its last status until it has been missing for ``consecutive`` cycles,
+  then is cleared with a note; a one-cycle hiccup therefore never clears a real
+  alert, and alerts.log never leaves a breach open forever.
 """
 
 from __future__ import annotations
@@ -45,7 +49,9 @@ def level(value: float, t: Threshold, higher_is_worse: bool, margin: float = 0.0
     def beyond(limit: float | None) -> bool:
         if limit is None:
             return False
-        return value > limit - margin if higher_is_worse else value < limit + margin
+        if higher_is_worse:
+            return value > limit - min(margin, limit / 2)
+        return value < limit + min(margin, (100 - limit) / 2)
 
     if beyond(t.critical):
         return 2
@@ -67,6 +73,7 @@ class _TargetState:
     status: int = 0
     cycles_in_status: int = 0
     recent: deque = field(default_factory=deque)  # raw levels, newest last
+    missing: int = 0  # consecutive cycles the target was not reported
 
 
 # Which collector feeds each rule: if that collector failed this cycle, its
@@ -99,6 +106,7 @@ class RuleEngine:
             t = self.thresholds[rule]
             seen.add((rule, target))
             state = self._state.setdefault((rule, target), _TargetState())
+            state.missing = 0
             if value is None:  # collector failed: no new information, keep the status
                 status = _NAMES[state.status]
             else:
@@ -107,9 +115,16 @@ class RuleEngine:
                 checks.append(Check(rule, target, value, status, limit_for(status, t)))
 
         for rule, target in [k for k in self._state if k not in seen]:
-            if _COLLECTOR[rule] in failed:
-                continue  # unknown this cycle, not gone
-            state = self._state.pop((rule, target))
+            state = self._state[(rule, target)]
+            t = self.thresholds[rule]
+            if _COLLECTOR[rule] not in failed:
+                state.missing += 1  # (a failed collector says nothing either way)
+            if _COLLECTOR[rule] in failed or state.missing < self.alerting.consecutive:
+                if state.status > 0:  # still counted until it is clearly gone
+                    status = _NAMES[state.status]
+                    checks.append(Check(rule, target, None, status, limit_for(status, t)))
+                continue
+            del self._state[(rule, target)]
             if state.status > 0:
                 was = _NAMES[state.status]
                 why = (
