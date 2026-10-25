@@ -17,6 +17,7 @@ import json
 import multiprocessing as mp
 import os
 import platform
+import re
 import signal
 import subprocess
 import sys
@@ -609,6 +610,174 @@ def phase2(out: Path, rep: Report) -> None:
         )
 
 
+# --------------------------------------------------------------------- phase 3
+STAGED_CONFIG = """
+thresholds:
+  cpu_max: {warning: 40, critical: 70}
+  memory_max: off
+  swap_max: off
+  disk_min_free: off
+  process_cpu_max: off
+  process_memory_max: off
+alerting: {consecutive: 2, recovery_margin: 5, repeat_every: 2}
+"""
+ALERT_LINE = re.compile(
+    r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d (OK|WARNING|CRITICAL) +\S+ +\S.* "
+    r"value=\S+ +limit=\S+ +.+$"
+)
+
+
+def phase3(out: Path, rep: Report) -> None:
+    d = out / "phase3"
+    d.mkdir(exist_ok=True)
+    py = [sys.executable, "-m", "sysmon"]
+
+    # --- configuration handling
+    cases = {
+        "critical below warning": (
+            "bad1.yaml",
+            "thresholds:\n  cpu_max: {warning: 90, critical: 80}\n",
+        ),
+        "broken YAML": ("bad2.yaml", "thresholds:\n  cpu_max: {warning: 75\n"),
+        "broken JSON": ("bad3.json", '{"thresholds": {"cpu_max": 85,}}'),
+        "not a number": ("bad4.yaml", "thresholds:\n  cpu_max: high\n"),
+        "wrong file type": ("bad5.txt", "interval: 15\n"),
+    }
+    for label, (name, text) in cases.items():
+        (d / name).write_text(text, encoding="utf-8")
+        res = run(
+            py + ["--once", "--output-dir", str(d / "x"), "--threshold-config", str(d / name)]
+        )
+        err = res.stderr.strip()
+        rep.check(
+            f"config error ({label}) -> exit 4, one clear line",
+            res.returncode == 4 and len(err.splitlines()) == 1 and "Traceback" not in err,
+            f"exit={res.returncode}: {err[-150:]}",
+        )
+    res = run(
+        py + ["--once", "--output-dir", str(d / "x"), "--threshold-config", str(d / "nope.yaml")]
+    )
+    rep.check(
+        "missing config file -> exit 4 (not silent defaults)",
+        res.returncode == 4 and "not found" in res.stderr,
+        f"exit={res.returncode}: {res.stderr.strip()[-120:]}",
+    )
+    (d / "typo.yaml").write_text("thresholds:\n  cpu_maxx: 50\n", encoding="utf-8")
+    res = run(
+        py + ["--once", "--output-dir", str(d / "t"), "--threshold-config", str(d / "typo.yaml")]
+    )
+    rep.check(
+        "typo in a rule name -> runs, warns with suggestion",
+        res.returncode == 0 and "did you mean 'thresholds.cpu_max'" in res.stderr,
+        res.stderr.strip()[-150:],
+    )
+    (d / "brief.yaml").write_text(
+        "thresholds:\n  cpu_max: 85%\n  disk_min_free: 15%\n", encoding="utf-8"
+    )
+    res = run(
+        py + ["--once", "--output-dir", str(d / "b"), "--threshold-config", str(d / "brief.yaml")]
+    )
+    rep.check(
+        "brief-style config (cpu_max: 85%, disk_min_free: 15%) is understood",
+        res.returncode == 0
+        and "cpu_max            : CRITICAL > 85%" in res.stdout
+        and "disk_min_free      : CRITICAL < 15%" in res.stdout,
+        f"exit={res.returncode}",
+    )
+    shipped = Path(__file__).resolve().parents[1] / "config" / "config.yaml"
+    res = run(py + ["--once", "--output-dir", str(d / "s"), "--threshold-config", str(shipped)])
+    rep.check(
+        "shipped config/config.yaml runs",
+        res.returncode == 0 and not res.stderr.count("WARNING sysmon"),
+        res.stderr[-150:],
+    )
+    res = run(py + ["--once", "--output-dir", str(d / "n")])
+    rep.check(
+        "no config -> built-in thresholds, and says so",
+        res.returncode == 0 and "using built-in thresholds" in res.stderr,
+        res.stderr.strip()[-120:],
+    )
+
+    # --- live alerting: staged CPU load gives an exact, predictable alert sequence
+    cfg = d / "staged.yaml"
+    cfg.write_text(STAGED_CONFIG, encoding="utf-8")
+    run_dir = d / "staged"
+    metrics = run_dir / "metrics.jsonl"
+    cores = os.cpu_count() or 2
+    half = max(1, cores // 2)
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0
+    stdout_f = open(d / "staged_stdout.txt", "w", encoding="utf-8")  # noqa: SIM115
+    agent = subprocess.Popen(
+        py + ["--interval", "10", "--threshold-config", str(cfg), "--output-dir", str(run_dir)],
+        stdout=stdout_f,
+        stderr=subprocess.STDOUT,
+        creationflags=flags,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    burners: list = []
+    try:
+        _wait_cycles(metrics, 1, 30)
+        burners += [mp.Process(target=_burn, args=(300.0,), daemon=True) for _ in range(half)]
+        for b in burners:
+            b.start()  # ~50 % of the machine: above warning 40, below critical 70
+        _wait_cycles(metrics, 3, 40)
+        more = [mp.Process(target=_burn, args=(300.0,), daemon=True) for _ in range(cores - half)]
+        for b in more:
+            b.start()  # ~100 %: above critical 70
+        burners += more
+        _wait_cycles(metrics, 5, 40)
+        for b in burners:
+            b.terminate()  # load gone
+        snaps = _wait_cycles(metrics, 7, 40)
+    finally:
+        for b in burners:
+            b.terminate()
+        agent.send_signal(signal.CTRL_BREAK_EVENT if IS_WINDOWS else signal.SIGINT)
+        try:
+            code = agent.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            agent.kill()
+            code = "killed"
+        stdout_f.close()
+
+    cpu = [s["cpu"]["percent"] for s in snaps]
+    rep.info(f"staged load ({half}+{cores - half} of {cores} cores) CPU per cycle: {cpu}")
+    events = [(s["cycle"], a["note"]) for s in snaps for a in s["alerts"] if a["rule"] == "cpu_max"]
+    expected = [
+        (3, "OK->WARNING"),
+        (4, "still WARNING (2 cycles)"),
+        (5, "WARNING->CRITICAL"),
+        (6, "CRITICAL->OK"),
+    ]
+    rep.check("exact alert sequence for the staged load", events == expected, f"got {events}")
+    statuses = [s["status"] for s in snaps[:7]]
+    rep.check(
+        "per-cycle status in metrics.jsonl",
+        statuses == ["OK", "OK", "WARNING", "WARNING", "CRITICAL", "OK", "OK"],
+        str(statuses),
+    )
+    try:
+        lines = (run_dir / "alerts.log").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    rep.check(
+        "alerts.log has the same events, well-formed lines",
+        [ln.rsplit("  ", 1)[-1].strip() for ln in lines] == [n for _, n in expected]
+        and all(ALERT_LINE.match(ln) for ln in lines),
+        " || ".join(lines)[-400:],
+    )
+    console = (d / "staged_stdout.txt").read_text(encoding="utf-8", errors="replace")
+    rep.check(
+        "console shows status and ALERT lines; clean stop",
+        "ALERT WARNING" in console
+        and "ALERT CRITICAL" in console
+        and "ALERT OK" in console
+        and code == 0
+        and "Traceback" not in console,
+        f"exit={code}",
+    )
+
+
 # ------------------------------------------------------------ robustness (all phases)
 NONADMIN_USER = "sysmone2e"
 NONADMIN_PASS = "Sm0n!e2e#2026"  # <= 14 chars: longer makes `net user` stop and ask Y/N
@@ -817,7 +986,12 @@ $b = RunAs '-m sysmon --once --output-dir "{base}/once"' 'once'
     )
 
 
-PHASES = {"phase1": [phase1], "phase2": [phase2], "robustness": [robustness]}
+PHASES = {
+    "phase1": [phase1],
+    "phase2": [phase2],
+    "phase3": [phase3],
+    "robustness": [robustness],
+}
 
 
 def main() -> int:

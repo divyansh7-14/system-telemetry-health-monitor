@@ -26,6 +26,7 @@ import signal
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -33,13 +34,16 @@ from typing import Any
 from sysmon.collectors.network import NetworkSampler
 from sysmon.collectors.processes import ProcessSampler
 from sysmon.collectors.resources import CpuSampler, collect_disks, collect_memory
+from sysmon.logs import LineWriter
 from sysmon.models import Snapshot
+from sysmon.rules import RuleEngine
 
 log = logging.getLogger(__name__)
 
 WAIT_SLICE = 0.25  # seconds; upper bound on how long a stop request can go unnoticed
 WARMUP_SECONDS = 1.0  # first cycle measures CPU over this window instead of a full interval
 METRICS_FILE = "metrics.jsonl"
+ALERTS_FILE = "alerts.log"
 
 
 class Agent:
@@ -49,12 +53,17 @@ class Agent:
         interval: float,
         top_n: int = 5,
         *,
+        rules: RuleEngine | None = None,
         on_snapshot: Callable[[Snapshot], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
         stop_event: threading.Event | None = None,
     ) -> None:
         self.out_dir = out_dir
         self.metrics_path = out_dir / METRICS_FILE
+        self.alerts_path = out_dir / ALERTS_FILE
+        self.metrics_out = LineWriter(self.metrics_path)
+        self.alerts_out = LineWriter(self.alerts_path)
+        self.rules = rules or RuleEngine()
         self.interval = interval
         self.on_snapshot = on_snapshot
         self.clock = clock
@@ -64,9 +73,7 @@ class Agent:
         self.processes = ProcessSampler(top_n)
         self.network = NetworkSampler(clock=clock)
         self._disk_warned: set[str] = set()
-        self._write_failed = False
         self._display_failed = False
-        self._checked_tail = False
 
     # -------------------------------------------------------------- lifecycle
     def stop(self) -> None:
@@ -159,6 +166,12 @@ class Agent:
             top_processes=top,
             errors=errors,
         )
+        try:
+            status, checks, alerts = self.rules.evaluate(snap)
+            snap = replace(snap, status=status, checks=checks, alerts=alerts)
+        except Exception as exc:  # noqa: BLE001 - a rules bug must not stop data collection
+            log.error("evaluating health rules failed: %s", exc, exc_info=True)
+            snap = replace(snap, errors=[*snap.errors, f"rules: {type(exc).__name__}: {exc}"])
         self._write(snap)
         if self.on_snapshot:
             try:
@@ -170,36 +183,11 @@ class Agent:
         return snap
 
     def _write(self, snap: Snapshot) -> None:
-        """Append one JSON line. A failed write is reported, never fatal."""
-        line = json.dumps(snap.to_dict(), ensure_ascii=False, separators=(",", ":")) + "\n"
-        if not self._checked_tail:
-            # A previous run killed mid-write leaves a partial last line; start on a
-            # fresh line so that damage never spreads to this run's first record.
-            line = self._newline_if_unterminated() + line
-        try:
-            # Opened per write: no long-lived handle that would block rotation on Windows.
-            with self.metrics_path.open("a", encoding="utf-8") as fh:
-                fh.write(line)
-        except OSError as exc:
-            if not self._write_failed:
-                log.error("cannot write %s: %s (will keep trying)", self.metrics_path, exc)
-            self._write_failed = True
-        else:
-            self._checked_tail = True
-            if self._write_failed:
-                log.info("writing %s works again", self.metrics_path)
-            self._write_failed = False
-
-    def _newline_if_unterminated(self) -> str:
-        try:
-            with self.metrics_path.open("rb") as fh:
-                fh.seek(0, 2)
-                if fh.tell() == 0:
-                    return ""
-                fh.seek(-1, 2)
-                return "" if fh.read(1) == b"\n" else "\n"
-        except OSError:
-            return ""
+        """Append the snapshot to metrics.jsonl and its alerts to alerts.log."""
+        if snap.alerts:
+            self.alerts_out.write("".join(a.line() + "\n" for a in snap.alerts))
+        line = json.dumps(snap.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        self.metrics_out.write(line + "\n")
 
 
 # ------------------------------------------------------------------ signals

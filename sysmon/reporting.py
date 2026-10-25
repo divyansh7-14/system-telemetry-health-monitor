@@ -64,7 +64,11 @@ def format_snapshot(s: Snapshot) -> str:
     if s.network:
         n = s.network
         parts.append(f"Net rx {human_rate(n.recv_bps)} tx {human_rate(n.sent_bps)}")
-    lines = [f"[#{s.cycle} {time_part}] " + " | ".join(parts) + f"  ({s.duration_ms} ms)"]
+    lines = [
+        f"[#{s.cycle} {time_part} {s.status}] " + " | ".join(parts) + f"  ({s.duration_ms} ms)"
+    ]
+    for a in s.alerts:
+        lines.append("    ALERT " + a.line()[len(a.timestamp) + 1 :].rstrip())
     if s.top_processes:
         t = s.top_processes
         lines.append(

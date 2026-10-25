@@ -223,3 +223,59 @@ def test_no_blank_line_added_to_clean_file(fake_agent, tmp_path):
     (tmp_path / "metrics.jsonl").write_text('{"cycle":1}\n', encoding="utf-8")
     fake_agent.run(max_cycles=1)
     assert "" not in (tmp_path / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+
+
+def test_alerts_written_and_metrics_carry_status(tmp_path, monkeypatch):
+    """CPU at 12.5 % with cpu_max critical 10: raised on cycle 2, in metrics and alerts.log."""
+    from sysmon.config import AlertingConfig, Config, Threshold
+    from sysmon.rules import RuleEngine
+
+    off = {k: Threshold(None, None) for k in Config().thresholds}
+    cfg = Config(
+        thresholds={**off, "cpu_max": Threshold(5, 10)},
+        alerting=AlertingConfig(consecutive=2, recovery_margin=5, repeat_every=2),
+    )
+    clock = FakeClock()
+    a = Agent(tmp_path, interval=10, top_n=3, clock=clock, rules=RuleEngine(cfg))
+
+    def fake_wait(timeout):
+        clock.now += timeout
+        return False
+
+    monkeypatch.setattr(a.stop_event, "wait", fake_wait)
+    monkeypatch.setattr(a.cpu, "prime", lambda: None)
+    monkeypatch.setattr(a.processes, "prime", lambda: None)
+    monkeypatch.setattr(a.cpu, "sample", lambda: CpuStats(percent=12.5, per_core_percent=[12.5]))
+    monkeypatch.setattr(a.processes, "sample", lambda: TopProcesses([], [], 0))
+    monkeypatch.setattr(
+        a.network, "sample", lambda: NetworkStats(1, 2, None, None, None, None, None, [])
+    )
+    monkeypatch.setattr(agent_mod, "collect_memory", lambda: None)
+    monkeypatch.setattr(agent_mod, "collect_disks", lambda warned: [])
+    a.run(max_cycles=3)
+
+    lines = read_lines(tmp_path / "metrics.jsonl")
+    assert [x["status"] for x in lines] == ["OK", "CRITICAL", "CRITICAL"]
+    assert lines[1]["checks"] == [
+        {"rule": "cpu_max", "target": "cpu", "value": 12.5, "status": "CRITICAL", "limit": 10.0}
+    ]
+    assert [e["note"] for x in lines for e in x["alerts"]] == [
+        "OK->CRITICAL",
+        "still CRITICAL (2 cycles)",
+    ]
+    alerts = (tmp_path / "alerts.log").read_text(encoding="utf-8").splitlines()
+    assert len(alerts) == 2
+    assert " CRITICAL cpu_max " in alerts[0] and alerts[0].endswith("OK->CRITICAL")
+    assert alerts[1].endswith("still CRITICAL (2 cycles)")
+
+
+def test_rules_bug_does_not_stop_collection(fake_agent, tmp_path, caplog):
+    class Broken:
+        def evaluate(self, snap):
+            raise RuntimeError("bug")
+
+    fake_agent.rules = Broken()
+    assert fake_agent.run(max_cycles=2) == 2
+    lines = read_lines(tmp_path / "metrics.jsonl")
+    assert lines[0]["errors"] == ["rules: RuntimeError: bug"]
+    assert lines[0]["cpu"]["percent"] == 12.5

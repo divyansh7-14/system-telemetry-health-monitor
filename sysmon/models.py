@@ -104,6 +104,41 @@ class NetworkStats:
 
 
 @dataclass(frozen=True)
+class Check:
+    """One rule evaluated against one target (cpu, a disk, a process) this cycle."""
+
+    rule: str
+    target: str
+    value: float | None  # None when the collector failed this cycle
+    status: str  # OK / WARNING / CRITICAL, after anti-flapping
+    limit: float | None  # the limit for this status (the first configured one when OK)
+
+
+@dataclass(frozen=True)
+class AlertEvent:
+    """A line of alerts.log: a status change, or a reminder that a breach goes on."""
+
+    timestamp: str
+    rule: str
+    target: str
+    status: str  # status after the event
+    previous: str
+    value: float | None
+    limit: float | None
+    note: (
+        str  # "OK->WARNING", "still CRITICAL (10 cycles)", "CRITICAL->OK (disk no longer present)"
+    )
+
+    def line(self) -> str:
+        value = "-" if self.value is None else f"{self.value:.1f}%"
+        limit = "-" if self.limit is None else f"{self.limit:g}%"
+        return (
+            f"{self.timestamp} {self.status:<8} {self.rule:<18} {self.target:<22} "
+            f"value={value:<7} limit={limit:<5} {self.note}"
+        )
+
+
+@dataclass(frozen=True)
 class Snapshot:
     """Everything collected in one polling cycle (one line of metrics.jsonl)."""
 
@@ -116,6 +151,9 @@ class Snapshot:
     network: NetworkStats | None
     top_processes: TopProcesses | None
     errors: list[str] = field(default_factory=list)  # collectors that failed this cycle
+    status: str = "OK"  # worst check status this cycle
+    checks: list[Check] = field(default_factory=list)
+    alerts: list[AlertEvent] = field(default_factory=list)  # also written to alerts.log
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

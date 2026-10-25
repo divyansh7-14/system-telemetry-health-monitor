@@ -74,8 +74,62 @@ def test_once_writes_host_info_and_one_snapshot(tmp_path, fast, capsys):
 
 
 def test_unused_flags_warn(tmp_path, fast, caplog):
-    main(["--once", "--output-dir", str(tmp_path), "--threshold-config", "x.yaml"])
-    assert "--threshold-config is accepted but not used yet" in caplog.text
+    main(["--once", "--output-dir", str(tmp_path), "--max-log-mb", "1"])
+    assert "--max-log-mb is accepted but not used yet" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("thresholds:\n  cpu_max: {warning: 90, critical: 80}\n", "must be lower than critical"),
+        ("thresholds: [\n", "invalid YAML at line"),
+    ],
+)
+def test_invalid_config_exits_4_with_one_line(tmp_path, capsys, text, message):
+    cfg = tmp_path / "bad.yaml"
+    cfg.write_text(text, encoding="utf-8")
+    assert (
+        main(["--once", "--output-dir", str(tmp_path / "out"), "--threshold-config", str(cfg)]) == 4
+    )
+    err = capsys.readouterr().err.strip()
+    assert message in err and len(err.splitlines()) == 1 and "Traceback" not in err
+    assert not (tmp_path / "out").exists()  # nothing started
+
+
+def test_missing_config_file_exits_4(tmp_path, capsys):
+    assert main(["--once", "--threshold-config", str(tmp_path / "nope.yaml")]) == 4
+    assert "config file not found" in capsys.readouterr().err
+
+
+def test_no_config_says_built_in(tmp_path, fast, caplog, capsys):
+    import logging
+
+    caplog.set_level(logging.INFO)
+    assert main(["--once", "--output-dir", str(tmp_path)]) == 0
+    assert "using built-in thresholds" in caplog.text
+    assert "== Health rules (built-in defaults) ==" in capsys.readouterr().out
+
+
+def test_config_file_applied_and_cli_overrides_it(tmp_path, fast, monkeypatch, capsys, caplog):
+    from sysmon import cli
+
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("interval: 25\ntop_n: 2\nthresholds:\n  cpu_maxx: 1\n", encoding="utf-8")
+    seen = {}
+
+    class Spy(cli.Agent):
+        def __init__(self, out_dir, interval, top_n, **kw):
+            seen.update(interval=interval, top_n=top_n)
+            super().__init__(out_dir, interval, top_n, **kw)
+
+    monkeypatch.setattr(cli, "Agent", Spy)
+    out = str(tmp_path / "o")
+    assert (
+        main(["--once", "--output-dir", out, "--threshold-config", str(cfg), "--top-n", "4"]) == 0
+    )
+    assert seen == {"interval": 25, "top_n": 4}  # file interval, CLI top-n
+    assert "did you mean 'thresholds.cpu_max'" in caplog.text
+    assert f"== Health rules ({cfg}) ==" in capsys.readouterr().out
 
 
 def test_unwritable_output_dir_exits_3(tmp_path, capsys):

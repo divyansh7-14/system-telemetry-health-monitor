@@ -12,19 +12,21 @@ from pathlib import Path
 from sysmon import __version__
 from sysmon.agent import Agent, install_stop_handlers
 from sysmon.collectors.host import collect_host_info
+from sysmon.config import ConfigError, describe, load_config
 from sysmon.models import Snapshot
 from sysmon.reporting import format_host_info, format_network, format_snapshot, write_json_atomic
+from sysmon.rules import RuleEngine
 
 MIN_INTERVAL = 10
 MAX_INTERVAL = 30
 DEFAULT_INTERVAL = 15
-DEFAULT_TOP_N = 5
 
 # Exit codes. 2 is reserved for command-line usage errors (argparse uses it).
 EXIT_OK = 0
 EXIT_UNEXPECTED = 1
 EXIT_USAGE = 2
 EXIT_OUTPUT_DIR = 3
+EXIT_CONFIG = 4
 
 
 def _interval(value: str) -> int:
@@ -68,7 +70,10 @@ def build_parser() -> argparse.ArgumentParser:
             "processes, checks them against configurable thresholds, and logs "
             "OK / WARNING / CRITICAL status."
         ),
-        epilog="exit codes: 0 ok, 1 unexpected error, 2 bad arguments, 3 output not writable",
+        epilog=(
+            "exit codes: 0 ok, 1 unexpected error, 2 bad arguments, "
+            "3 output not writable, 4 invalid config"
+        ),
     )
     parser.add_argument(
         "--interval",
@@ -76,14 +81,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             f"polling interval in seconds, {MIN_INTERVAL}-{MAX_INTERVAL} "
-            f"(default: {DEFAULT_INTERVAL})"
+            f"(default: config file, else {DEFAULT_INTERVAL})"
         ),
     )
     parser.add_argument(
         "--threshold-config",
         metavar="PATH",
         default=None,
-        help="path to a .yaml/.yml or .json file with health thresholds",
+        help=(
+            "YAML or JSON file with health thresholds, e.g. config/config.yaml "
+            "(default: built-in thresholds, the same as config/config.yaml)"
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -95,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--top-n",
         type=_positive_int,
         default=None,
-        help="number of top CPU and memory processes to record (default: 5)",
+        help="number of top CPU and memory processes to record (default: config file, else 5)",
     )
     parser.add_argument(
         "--once",
@@ -189,13 +197,25 @@ def _error(text: str) -> None:
 def _run(args: argparse.Namespace) -> int:
     logging.basicConfig(level=args.log_level, format="%(levelname)s %(name)s: %(message)s")
     log = logging.getLogger("sysmon")
-    for flag, value in (
-        ("--threshold-config", args.threshold_config),
-        ("--max-log-mb", args.max_log_mb),
-        ("--backup-count", args.backup_count),
-    ):
+    for flag, value in (("--max-log-mb", args.max_log_mb), ("--backup-count", args.backup_count)):
         if value is not None:
             log.warning("%s is accepted but not used yet (in development)", flag)
+
+    try:
+        config = load_config(args.threshold_config)
+    except ConfigError as exc:
+        _error(f"sysmon: {exc}")
+        return EXIT_CONFIG
+    for warning in config.warnings:
+        log.warning("config: %s", warning)
+    config = config.with_overrides(
+        interval=args.interval,
+        top_n=args.top_n,
+        max_log_mb=args.max_log_mb,
+        backup_count=args.backup_count,
+    )
+    if config.source is None:
+        log.info("no --threshold-config given; using built-in thresholds")
 
     try:
         out_dir = prepare_output_dir(args.output_dir)
@@ -210,8 +230,12 @@ def _run(args: argparse.Namespace) -> int:
         _error(f"sysmon: cannot write host_info.json in {out_dir}: {exc}")
         return EXIT_OUTPUT_DIR
     say(format_host_info(host))
+    say(
+        f"== Health rules ({config.source or 'built-in defaults'}) ==\n"
+        + "\n".join(describe(config))
+    )
 
-    interval = args.interval or DEFAULT_INTERVAL
+    interval = config.interval
     first = True
 
     def show(snap: Snapshot) -> None:
@@ -219,13 +243,13 @@ def _run(args: argparse.Namespace) -> int:
         if first:
             say(format_network(snap))
             say(
-                f"\nWriting {out_dir / 'metrics.jsonl'}"
+                f"\nWriting {out_dir / 'metrics.jsonl'} and {out_dir / 'alerts.log'}"
                 + ("" if args.once else f" every {interval}s. Press Ctrl+C to stop.")
             )
             first = False
         say(format_snapshot(snap))
 
-    agent = Agent(out_dir, interval, args.top_n or DEFAULT_TOP_N, on_snapshot=show)
+    agent = Agent(out_dir, interval, config.top_n, rules=RuleEngine(config), on_snapshot=show)
     restore = install_stop_handlers(agent)
     try:
         cycles = agent.run(max_cycles=1 if args.once else None)
