@@ -14,6 +14,8 @@ from sysmon import __version__
 from sysmon.agent import Agent, install_stop_handlers
 from sysmon.collectors.host import collect_host_info
 from sysmon.config import ConfigError, describe, load_config
+from sysmon.instance import AlreadyRunning, InstanceLock, request_stop
+from sysmon.logs import MB, setup_logging
 from sysmon.models import Snapshot
 from sysmon.reporting import format_host_info, format_network, format_snapshot, write_json_atomic
 from sysmon.rules import RuleEngine
@@ -28,6 +30,8 @@ EXIT_UNEXPECTED = 1
 EXIT_USAGE = 2
 EXIT_OUTPUT_DIR = 3
 EXIT_CONFIG = 4
+EXIT_ALREADY_RUNNING = 5
+AGENT_LOG = "agent.log"
 
 
 def _interval(value: str) -> int:
@@ -53,13 +57,13 @@ def _positive_int(value: str) -> int:
     return number
 
 
-def _positive_float(value: str) -> float:
+def _log_mb(value: str) -> float:
     try:
         number = float(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"expected a number, got {value!r}") from exc
-    if number <= 0:
-        raise argparse.ArgumentTypeError(f"expected a number > 0, got {number}")
+    if not 0.01 <= number <= 1024:
+        raise argparse.ArgumentTypeError(f"expected 0.01 to 1024 (MB), got {number:g}")
     return number
 
 
@@ -73,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         epilog=(
             "exit codes: 0 ok, 1 unexpected error, 2 bad arguments, "
-            "3 output not writable, 4 invalid config"
+            "3 output not writable, 4 invalid config, 5 another agent uses the folder"
         ),
     )
     parser.add_argument(
@@ -112,6 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="run a single collection cycle and exit",
     )
     parser.add_argument(
+        "--stop",
+        action="store_true",
+        help="stop the agent writing to --output-dir (e.g. one started in the background) and exit",
+    )
+    parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default="INFO",
@@ -119,7 +128,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--max-log-mb",
-        type=_positive_float,
+        type=_log_mb,
         default=None,
         help="rotate each log file when it reaches this size in MB (default: 5)",
     )
@@ -182,9 +191,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return _run(args)
     except KeyboardInterrupt:
-        if sys.stderr is not None:
-            print("\nsysmon: interrupted, stopping.", file=sys.stderr)
+        _error("\nsysmon: interrupted, stopping.")
         return EXIT_OK
+    except Exception as exc:  # noqa: BLE001 - last resort: one clear line, full detail in agent.log
+        logging.getLogger("sysmon").critical("unexpected error, agent stopped", exc_info=True)
+        _error(f"sysmon: unexpected error: {type(exc).__name__}: {exc} (details in agent.log)")
+        return EXIT_UNEXPECTED
 
 
 def _error(text: str) -> None:
@@ -195,28 +207,36 @@ def _error(text: str) -> None:
             pass
 
 
+def _stop(out_dir: Path) -> int:
+    result, owner = request_stop(out_dir)
+    if result == "not-running":
+        say(f"sysmon: no running agent is using {out_dir}")
+        return EXIT_OK
+    if result == "stopped":
+        say(f"sysmon: agent (PID {owner.pid}) using {out_dir} has stopped")
+        return EXIT_OK
+    _error(f"sysmon: agent (PID {owner.pid}) did not stop within 30 s")
+    return EXIT_UNEXPECTED
+
+
 def _run(args: argparse.Namespace) -> int:
-    logging.basicConfig(level=args.log_level, format="%(levelname)s %(name)s: %(message)s")
+    setup_logging(args.log_level, None, None, 0)  # console only until the folder is known
     log = logging.getLogger("sysmon")
-    for flag, value in (("--max-log-mb", args.max_log_mb), ("--backup-count", args.backup_count)):
-        if value is not None:
-            log.warning("%s is accepted but not used yet (in development)", flag)
+
+    if args.stop:
+        return _stop(Path(args.output_dir).expanduser().resolve())
 
     try:
         config = load_config(args.threshold_config)
     except ConfigError as exc:
         _error(f"sysmon: {exc}")
         return EXIT_CONFIG
-    for warning in config.warnings:
-        log.warning("config: %s", warning)
     config = config.with_overrides(
         interval=args.interval,
         top_n=args.top_n,
         max_log_mb=args.max_log_mb,
         backup_count=args.backup_count,
     )
-    if config.source is None:
-        log.info("no --threshold-config given; using built-in thresholds")
     if args.once:
         # A single reading cannot last N cycles: judge it as it is, or --once
         # would report OK for a disk that is already full.
@@ -228,38 +248,95 @@ def _run(args: argparse.Namespace) -> int:
         _error(f"sysmon: cannot write to output directory {args.output_dir!r}: {exc}")
         return EXIT_OUTPUT_DIR
 
-    host = collect_host_info()
+    lock = InstanceLock(out_dir)
     try:
-        write_json_atomic(out_dir / "host_info.json", host.to_dict())
+        lock.acquire()
+    except AlreadyRunning as exc:
+        _error(f'sysmon: {exc}. Stop it with: sysmon --stop --output-dir "{out_dir}"')
+        return EXIT_ALREADY_RUNNING
     except OSError as exc:
-        _error(f"sysmon: cannot write host_info.json in {out_dir}: {exc}")
+        _error(f"sysmon: cannot create the lock file in {out_dir}: {exc}")
         return EXIT_OUTPUT_DIR
-    say(format_host_info(host))
-    say(
-        f"== Health rules ({config.source or 'built-in defaults'}) ==\n"
-        + "\n".join(describe(config))
-    )
 
-    interval = config.interval
-    first = True
-
-    def show(snap: Snapshot) -> None:
-        nonlocal first
-        if first:
-            say(format_network(snap))
-            say(
-                f"\nWriting {out_dir / 'metrics.jsonl'} and {out_dir / 'alerts.log'}"
-                + ("" if args.once else f" every {interval}s. Press Ctrl+C to stop.")
-            )
-            first = False
-        say(format_snapshot(snap))
-
-    agent = Agent(out_dir, interval, config.top_n, rules=RuleEngine(config), on_snapshot=show)
-    restore = install_stop_handlers(agent)
+    max_bytes = int(config.logging.max_log_mb * MB)
+    setup_logging(args.log_level, out_dir / AGENT_LOG, max_bytes, config.logging.backup_count)
+    cycles = 0
+    agent: Agent | None = None
     try:
-        cycles = agent.run(max_cycles=1 if args.once else None)
+        log.info(
+            "agent started: sysmon %s, PID %s, output %s, interval %ss, top %s, logs rotate at "
+            "%g MB x %d",
+            __version__,
+            os.getpid(),
+            out_dir,
+            config.interval,
+            config.top_n,
+            config.logging.max_log_mb,
+            config.logging.backup_count,
+        )
+        if lock.took_over is not None:
+            log.warning(
+                "previous agent (PID %s, started %s) did not shut down cleanly; lock taken over",
+                lock.took_over.pid,
+                lock.took_over.started,
+            )
+        for warning in config.warnings:
+            log.warning("config: %s", warning)
+        if config.source is None:
+            log.info("no --threshold-config given; using built-in thresholds")
+        else:
+            log.info("thresholds loaded from %s", config.source)
+
+        host = collect_host_info()
+        try:
+            write_json_atomic(out_dir / "host_info.json", host.to_dict())
+        except OSError as exc:
+            _error(f"sysmon: cannot write host_info.json in {out_dir}: {exc}")
+            return EXIT_OUTPUT_DIR
+        say(format_host_info(host))
+        say(
+            f"== Health rules ({config.source or 'built-in defaults'}) ==\n"
+            + "\n".join(describe(config))
+        )
+
+        first = True
+
+        def show(snap: Snapshot) -> None:
+            nonlocal first
+            if first:
+                say(format_network(snap))
+                say(
+                    f"\nWriting {out_dir / 'metrics.jsonl'} and {out_dir / 'alerts.log'}"
+                    + (
+                        ""
+                        if args.once
+                        else f" every {config.interval}s. Stop with Ctrl+C or: "
+                        f'sysmon --stop --output-dir "{out_dir}"'
+                    )
+                )
+                first = False
+            say(format_snapshot(snap))
+
+        agent = Agent(
+            out_dir,
+            config.interval,
+            config.top_n,
+            rules=RuleEngine(config),
+            on_snapshot=show,
+            max_log_bytes=max_bytes,
+            backup_count=config.logging.backup_count,
+            stop_check=lock.stop_requested,
+        )
+        restore = install_stop_handlers(agent)
+        try:
+            cycles = agent.run(max_cycles=1 if args.once else None)
+        finally:
+            restore()
+        if not args.once:
+            say(f"\nsysmon: stopped after {cycles} cycle(s).")
+        return EXIT_OK
     finally:
-        restore()
-    if not args.once:
-        say(f"\nsysmon: stopped after {cycles} cycle(s).")
-    return EXIT_OK
+        reason = (agent.stop_reason if agent else None) or ("--once" if args.once else "exit")
+        done = agent.cycles if agent else cycles
+        log.info("agent stopped after %d cycle(s) (%s)", done, reason)
+        lock.release()

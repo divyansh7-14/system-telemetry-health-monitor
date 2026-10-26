@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from sysmon.cli import build_parser, main
@@ -73,9 +75,57 @@ def test_once_writes_host_info_and_one_snapshot(tmp_path, fast, capsys):
     assert "== Host ==" in out and "== Network ==" in out and "[#1 " in out
 
 
-def test_unused_flags_warn(tmp_path, fast, caplog):
-    main(["--once", "--output-dir", str(tmp_path), "--max-log-mb", "1"])
-    assert "--max-log-mb is accepted but not used yet" in caplog.text
+def test_agent_log_has_start_and_stop_lines(tmp_path, fast):
+    assert main(["--once", "--output-dir", str(tmp_path), "--max-log-mb", "1"]) == 0
+    text = (tmp_path / "agent.log").read_text(encoding="utf-8")
+    assert "agent started: sysmon" in text and "logs rotate at 1 MB x 3" in text
+    assert "using built-in thresholds" in text
+    assert text.rstrip().endswith("agent stopped after 1 cycle(s) (--once)")
+    assert not (tmp_path / "sysmon.lock").exists()  # released
+
+
+@pytest.mark.parametrize("value", ["0", "0.001", "2000", "x"])
+def test_max_log_mb_range(value):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--max-log-mb", value])
+
+
+def test_second_agent_on_same_folder_exits_5(tmp_path, fast, capsys):
+    from sysmon.instance import InstanceLock
+
+    other = InstanceLock(tmp_path)
+    other.acquire()  # this test process plays the running agent...
+    import json
+
+    data = json.loads((tmp_path / "sysmon.lock").read_text())
+    data["pid"] = os.getppid()  # ...but recorded as a different live process
+    import psutil
+
+    data["create_time"] = psutil.Process(os.getppid()).create_time()
+    (tmp_path / "sysmon.lock").write_text(json.dumps(data))
+    assert main(["--once", "--output-dir", str(tmp_path)]) == 5
+    err = capsys.readouterr().err
+    assert f"another sysmon agent (PID {os.getppid()}" in err and "sysmon --stop" in err
+
+
+def test_stop_when_nothing_running(tmp_path, capsys):
+    assert main(["--stop", "--output-dir", str(tmp_path)]) == 0
+    assert "no running agent" in capsys.readouterr().out
+
+
+def test_unexpected_error_exits_1_with_traceback_in_agent_log(tmp_path, fast, monkeypatch, capsys):
+    from sysmon import cli
+
+    def boom(*a, **k):
+        raise RuntimeError("something nobody expected")
+
+    monkeypatch.setattr(cli, "collect_host_info", boom)
+    assert main(["--once", "--output-dir", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "unexpected error: RuntimeError: something nobody expected (details in agent.log)" in err
+    log = (tmp_path / "agent.log").read_text(encoding="utf-8")
+    assert "Traceback" in log and "RuntimeError" in log
+    assert not (tmp_path / "sysmon.lock").exists()  # released even on a crash
 
 
 @pytest.mark.parametrize(

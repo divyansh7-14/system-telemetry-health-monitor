@@ -18,6 +18,7 @@ import multiprocessing as mp
 import os
 import platform
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -801,6 +802,191 @@ def phase3(out: Path, rep: Report) -> None:
     )
 
 
+# --------------------------------------------------------------------- phase 4
+def _background(args: list[str]) -> subprocess.Popen:
+    """Start the agent like a background service: no console on Windows (pythonw)."""
+    if IS_WINDOWS:
+        pyw = str(Path(sys.executable).with_name("pythonw.exe"))
+        return subprocess.Popen(
+            [pyw, "-m", "sysmon", *args],
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+            close_fds=True,
+        )
+    return subprocess.Popen(
+        [sys.executable, "-m", "sysmon", *args],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def _wait_exit(proc: subprocess.Popen, timeout: float) -> object:
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return "still running (killed)"
+
+
+def _last_line(path: Path) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+    except OSError:
+        return ""
+    return lines[-1] if lines else ""
+
+
+def phase4(out: Path, rep: Report) -> None:
+    d = out / "phase4"
+    d.mkdir(exist_ok=True)
+    py = [sys.executable, "-m", "sysmon"]
+
+    # --- background agent: rotation, second agent refused, stopped with --stop
+    bg_dir = d / "bg"
+    max_mb, backups = 0.01, 2
+    agent = _background(
+        [
+            "--interval",
+            "10",
+            "--output-dir",
+            str(bg_dir),
+            "--max-log-mb",
+            str(max_mb),
+            "--backup-count",
+            str(backups),
+        ]
+    )
+    try:
+        _wait_cycles(bg_dir / "metrics.jsonl", 1, 30)
+        second = run(py + ["--once", "--output-dir", str(bg_dir)])
+        rep.check(
+            "second agent on the same folder -> exit 5, names the running one",
+            second.returncode == 5
+            and f"PID {agent.pid}" in second.stderr
+            and "sysmon --stop" in second.stderr,
+            f"exit={second.returncode}: {second.stderr.strip()[-160:]}",
+        )
+        deadline = time.monotonic() + 70
+        while time.monotonic() < deadline and not (bg_dir / f"metrics.jsonl.{backups}").exists():
+            time.sleep(0.5)
+        time.sleep(11)  # one more cycle after the oldest backup appeared
+    finally:
+        t0 = time.monotonic()
+        stop = run(py + ["--stop", "--output-dir", str(bg_dir)])
+        code = _wait_exit(agent, 10)
+        stop_secs = time.monotonic() - t0
+    rep.check(
+        f"{'detached pythonw' if IS_WINDOWS else 'background'} agent stopped by `sysmon --stop`",
+        stop.returncode == 0 and "has stopped" in stop.stdout and code == 0 and stop_secs < 3,
+        f"stop exit={stop.returncode} agent exit={code} in {stop_secs:.1f}s: "
+        + stop.stdout.strip()[-100:],
+    )
+    last = _last_line(bg_dir / "agent.log")
+    rep.check(
+        "clean stop: final agent.log line, lock and stop request removed",
+        "agent stopped after" in last
+        and "(sysmon --stop)" in last
+        and not (bg_dir / "sysmon.lock").exists()
+        and not (bg_dir / "sysmon.stop").exists(),
+        last[-120:],
+    )
+    names = sorted(p.name for p in bg_dir.iterdir() if p.name.startswith("metrics.jsonl"))
+    limit = int(max_mb * 1024 * 1024)
+    expected_names = ["metrics.jsonl"] + [f"metrics.jsonl.{n}" for n in range(1, backups + 1)]
+    rep.check(f"rotation keeps exactly {backups} backups", names == expected_names, str(names))
+    cycles, sizes, too_big = [], {}, []
+    for name in reversed(expected_names):  # oldest first
+        f = bg_dir / name
+        if not f.exists():
+            continue
+        raw = f.read_bytes()
+        sizes[name] = len(raw)
+        lines = raw.decode("utf-8").splitlines()
+        longest = max((len(x.encode("utf-8")) + 1 for x in lines), default=0)
+        if len(raw) > max(limit, longest):
+            too_big.append(name)
+        cycles += [json.loads(x)["cycle"] for x in lines]
+    rep.check(
+        "rotated files stay within the size limit, no line lost or split",
+        not too_big and cycles == list(range(cycles[0], cycles[0] + len(cycles)))
+        if cycles
+        else False,
+        f"sizes={sizes} cycles={cycles} too_big={too_big}",
+    )
+    agent_log = (bg_dir / "agent.log").read_text(encoding="utf-8")
+    rep.check(
+        "agent.log records start, thresholds source and stop",
+        "agent started: sysmon" in agent_log and "using built-in thresholds" in agent_log,
+        agent_log.splitlines()[0][-120:] if agent_log else "empty",
+    )
+
+    # --- terminal stop: Ctrl+Break (Windows) / SIGTERM (Linux service manager)
+    sig_dir = d / "sig"
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0
+    a2 = subprocess.Popen(
+        py + ["--interval", "10", "--output-dir", str(sig_dir)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=flags,
+    )
+    _wait_cycles(sig_dir / "metrics.jsonl", 1, 30)
+    a2.send_signal(signal.CTRL_BREAK_EVENT if IS_WINDOWS else signal.SIGTERM)
+    code = _wait_exit(a2, 10)
+    want = "SIGBREAK" if IS_WINDOWS else "SIGTERM"
+    last = _last_line(sig_dir / "agent.log")
+    rep.check(
+        f"{want}: exit 0, final line with reason, lock removed",
+        code == 0 and f"({want})" in last and not (sig_dir / "sysmon.lock").exists(),
+        f"exit={code} last={last[-90:]}",
+    )
+
+    # --- crash (hard kill): the stale lock must not block the next start
+    crash_dir = d / "crash"
+    a3 = _background(["--interval", "10", "--output-dir", str(crash_dir)])
+    _wait_cycles(crash_dir / "metrics.jsonl", 1, 30)
+    a3.kill()  # TerminateProcess / SIGKILL: no cleanup at all
+    a3.wait(10)
+    left = (crash_dir / "sysmon.lock").exists()
+    res = run(py + ["--once", "--output-dir", str(crash_dir)])
+    log_text = (crash_dir / "agent.log").read_text(encoding="utf-8")
+    rep.check(
+        "after a hard kill the next agent takes over the stale lock",
+        left
+        and res.returncode == 0
+        and f"previous agent (PID {a3.pid}" in log_text
+        and not (crash_dir / "sysmon.lock").exists(),
+        f"lock left={left} exit={res.returncode} {res.stderr.strip()[-120:]}",
+    )
+
+    # --- output folder deleted while running: recreated, monitoring continues
+    del_dir = d / "deleted"
+    a4 = subprocess.Popen(
+        py + ["--interval", "10", "--output-dir", str(del_dir)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=flags,
+    )
+    try:
+        _wait_cycles(del_dir / "metrics.jsonl", 1, 30)
+        for _ in range(20):  # on Windows a file may be open for a moment
+            try:
+                shutil.rmtree(del_dir)
+                break
+            except OSError:
+                time.sleep(0.2)
+        gone = not del_dir.exists()
+        after = _wait_cycles(del_dir / "metrics.jsonl", 2, 30)
+        alive = a4.poll() is None
+    finally:
+        a4.send_signal(signal.CTRL_BREAK_EVENT if IS_WINDOWS else signal.SIGTERM)
+        code = _wait_exit(a4, 10)
+    rep.check(
+        "output folder deleted mid-run: recreated, agent keeps writing, clean exit",
+        gone and alive and len(after) >= 2 and code == 0,
+        f"deleted={gone} alive={alive} new cycles={[s['cycle'] for s in after]} exit={code}",
+    )
+
+
 # ------------------------------------------------------------ robustness (all phases)
 NONADMIN_USER = "sysmone2e"
 NONADMIN_PASS = "Sm0n!e2e#2026"  # <= 14 chars: longer makes `net user` stop and ask Y/N
@@ -1013,6 +1199,7 @@ PHASES = {
     "phase1": [phase1],
     "phase2": [phase2],
     "phase3": [phase3],
+    "phase4": [phase4],
     "robustness": [robustness],
 }
 

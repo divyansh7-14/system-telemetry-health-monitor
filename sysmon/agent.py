@@ -54,6 +54,9 @@ class Agent:
         top_n: int = 5,
         *,
         rules: RuleEngine | None = None,
+        max_log_bytes: int | None = None,
+        backup_count: int = 3,
+        stop_check: Callable[[], bool] | None = None,
         on_snapshot: Callable[[Snapshot], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
         stop_event: threading.Event | None = None,
@@ -61,8 +64,10 @@ class Agent:
         self.out_dir = out_dir
         self.metrics_path = out_dir / METRICS_FILE
         self.alerts_path = out_dir / ALERTS_FILE
-        self.metrics_out = LineWriter(self.metrics_path)
-        self.alerts_out = LineWriter(self.alerts_path)
+        self.metrics_out = LineWriter(self.metrics_path, max_log_bytes, backup_count)
+        self.alerts_out = LineWriter(self.alerts_path, max_log_bytes, backup_count)
+        self.stop_check = stop_check
+        self.stop_reason: str | None = None
         self.rules = rules or RuleEngine()
         self.interval = interval
         self.on_snapshot = on_snapshot
@@ -76,7 +81,9 @@ class Agent:
         self._display_failed = False
 
     # -------------------------------------------------------------- lifecycle
-    def stop(self) -> None:
+    def stop(self, reason: str = "stop requested") -> None:
+        if self.stop_reason is None:
+            self.stop_reason = reason
         self.stop_event.set()
 
     def prime(self) -> None:
@@ -130,6 +137,13 @@ class Agent:
             remaining = until - self.clock()
             if remaining <= 0:
                 return self.stop_event.is_set()
+            if self.stop_check is not None and not self.stop_event.is_set():
+                try:
+                    if self.stop_check():
+                        log.info("stop requested with 'sysmon --stop'")
+                        self.stop("sysmon --stop")
+                except OSError:
+                    pass
             if self.stop_event.wait(min(remaining, WAIT_SLICE)):
                 return True
 
@@ -203,8 +217,9 @@ def install_stop_handlers(agent: Agent) -> Callable[[], None]:
     def handler(signum: int, _frame: object) -> None:
         if agent.stop_event.is_set() and signum == signal.SIGINT:
             raise KeyboardInterrupt
-        log.info("received %s, stopping after the current step", signal.Signals(signum).name)
-        agent.stop()
+        name = signal.Signals(signum).name
+        log.info("received %s, stopping after the current step", name)
+        agent.stop(name)
 
     for name in names:
         sig = getattr(signal, name, None)
