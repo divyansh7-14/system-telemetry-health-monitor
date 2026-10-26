@@ -2,7 +2,7 @@
 
 Cross-platform Python agent that monitors CPU, RAM, disk, network and processes, checks them against configurable thresholds, and logs OK / WARNING / CRITICAL alerts.
 
-> **Status:** feature-complete (Phases 0–4): polling, thresholds and alerts, log rotation, single-instance lock and background stop. Full documentation and sample outputs arrive with v1.0.0. See [docs/PRD.md](docs/PRD.md) and [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md). Full documentation arrives with v1.0.0.
+> **Status:** feature-complete (Phases 0–4): polling, thresholds and alerts, log rotation, single-instance lock and background stop. Full documentation and sample outputs arrive with v1.0.0. See [docs/PRD.md](docs/PRD.md) and [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md).
 
 ## Quick start
 

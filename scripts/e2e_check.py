@@ -628,6 +628,36 @@ ALERT_LINE = re.compile(
 )
 
 
+def _oracle(values, warn, crit, consecutive, margin, repeat):
+    """Independent, plain re-statement of the documented alert rules (README / PRD FR-10),
+    used to check the agent against the CPU values it actually measured."""
+    names = ["OK", "WARNING", "CRITICAL"]
+    status, recent, in_status, events = 0, [], 0, []
+    for cycle, v in enumerate(values, start=1):
+        raw = 2 if v > crit else 1 if v > warn else 0
+        recent = (recent + [raw])[-consecutive:]
+        new = status
+        if len(recent) == consecutive and min(recent) > status:
+            new = min(recent)
+        elif status > 0:
+            still = (
+                2
+                if v > crit - min(margin, crit / 2)
+                else 1
+                if v > warn - min(margin, warn / 2)
+                else 0
+            )
+            new = min(status, still)
+        if new != status:
+            events.append((cycle, f"{names[status]}->{names[new]}"))
+            status, in_status = new, 1
+        else:
+            in_status += 1
+            if status and repeat and in_status % repeat == 0:
+                events.append((cycle, f"still {names[status]} ({in_status} cycles)"))
+    return events
+
+
 def phase3(out: Path, rep: Report) -> None:
     d = out / "phase3"
     d.mkdir(exist_ok=True)
@@ -753,6 +783,11 @@ def phase3(out: Path, rep: Report) -> None:
         for b in burners:
             b.terminate()  # load gone
         snaps = _wait_cycles(metrics, 7, 40)
+        # If the machine is still busy after the load, give the alert time to clear.
+        for extra in range(8, 13):
+            if snaps and snaps[-1]["status"] == "OK":
+                break
+            snaps = _wait_cycles(metrics, extra, 15)
     finally:
         for b in burners:
             b.terminate()
@@ -767,17 +802,35 @@ def phase3(out: Path, rep: Report) -> None:
     cpu = [s["cpu"]["percent"] for s in snaps]
     rep.info(f"staged load ({half}+{cores - half} of {cores} cores) CPU per cycle: {cpu}")
     events = [(s["cycle"], a["note"]) for s in snaps for a in s["alerts"] if a["rule"] == "cpu_max"]
-    expected = [
+    # The load stages must really have happened, or the test proves nothing.
+    staged = len(cpu) >= 7 and all(40 < v <= 70 for v in cpu[1:3]) and all(v > 70 for v in cpu[3:5])
+    rep.check("staged load produced ~50% then ~100% CPU", staged, str(cpu))
+    rising = [
         (3, "OK->WARNING"),
         (4, "still WARNING (2 cycles)"),
         (5, "WARNING->CRITICAL"),
-        (6, "CRITICAL->OK"),
     ]
-    rep.check("exact alert sequence for the staged load", events == expected, f"got {events}")
-    statuses = [s["status"] for s in snaps[:7]]
     rep.check(
-        "per-cycle status in metrics.jsonl",
-        statuses == ["OK", "OK", "WARNING", "WARNING", "CRITICAL", "OK", "OK"],
+        "raising sequence exact: OK->WARNING, still WARNING, ->CRITICAL",
+        events[:3] == rising,
+        f"got {events}",
+    )
+    expected = _oracle(cpu, warn=40, crit=70, consecutive=2, margin=5, repeat=2)
+    rep.check(
+        "whole sequence = documented rules applied to the measured CPU",
+        events == expected and any(n.endswith("->OK") for _, n in events),
+        f"agent {events} | rules {expected}",
+    )
+    if cpu[5:7] and max(cpu[5:7]) >= 35:  # the machine did not go quiet after the load
+        busy = [
+            [(p["name"], p["cpu_percent"]) for p in s["top_processes"]["by_cpu"][:3]]
+            for s in snaps[5:7]
+        ]
+        rep.info(f"background CPU after the load (cycles 6-7) came from: {busy}")
+    statuses = [s["status"] for s in snaps]
+    rep.check(
+        "per-cycle status in metrics.jsonl matches the alert events",
+        statuses[:5] == ["OK", "OK", "WARNING", "WARNING", "CRITICAL"] and statuses[-1] == "OK",
         str(statuses),
     )
     try:
@@ -786,7 +839,7 @@ def phase3(out: Path, rep: Report) -> None:
         lines = []
     rep.check(
         "alerts.log has the same events, well-formed lines",
-        [ln.rsplit("  ", 1)[-1].strip() for ln in lines] == [n for _, n in expected]
+        [ln.rsplit("  ", 1)[-1].strip() for ln in lines] == [n for _, n in events]
         and all(ALERT_LINE.match(ln) for ln in lines),
         " || ".join(lines)[-400:],
     )
