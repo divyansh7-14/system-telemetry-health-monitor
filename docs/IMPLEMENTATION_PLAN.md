@@ -27,7 +27,7 @@ start the next phase.
 | 1 | Host discovery + baseline CPU/RAM/disk | ✅ done — re-reviewed 22 Oct, verified on Windows Server 2025 + Linux, Py 3.10/3.12/3.14 (35 unit tests, 21 e2e checks) |
 | 2 | Polling loop, top processes, network, `metrics.jsonl` | ✅ done 22 Oct — verified on Windows + Linux (68 unit tests, 43 e2e checks on Windows) |
 | 3 | Config loader, rules engine, statuses, `alerts.log` | ✅ done 25 Oct — verified on Windows + Linux (136 unit tests, 70 e2e checks on Windows) |
-| 4 | Log rotation, graceful shutdown, error handling, lock file | Sun 25 Oct |
+| 4 | Log rotation, graceful shutdown, error handling, lock file | ✅ done 27 Oct — verified on Windows + Linux (171 unit tests, 81 e2e checks on Windows) |
 | 5 | Windows demo, `samples/`, full README, `v1.0.0` tag | Mon 26 – Tue 27 Oct |
 | — | Buffer / review | Wed 28 Oct (deadline) |
 
@@ -144,30 +144,38 @@ Re-review of Phase 3 (25 Oct, afternoon) — each bug reproduced first, then fix
 
 ---
 
-## Phase 4 — Log management, shutdown, error handling  *(Brief task 4)*
+## Phase 4 — Log management, shutdown, error handling ✅  *(Brief task 4)*
 
-**Build**
-1. `logs.py`
-   - `RotatingFileHandler(maxBytes=max_log_mb*1MB, backupCount, encoding="utf-8", delay=True)` for `agent.log`, `alerts.log`, `metrics.jsonl` (metrics via a dedicated logger with a bare `%(message)s` formatter).
-   - Override `handleError` so a failed rollover (Windows *WinError 32*) or full disk is reported once to stderr/agent.log and the agent keeps running.
-   - Single-instance lock: `sysmon.lock` holding the PID, created with `O_EXCL`; stale lock (PID not running) is replaced; live lock → exit 5.
-2. Signals (handlers already built in Phase 2): `finally:` writes "agent stopped after N cycles", closes handlers, removes the lock.
-3. **Graceful stop for a background agent** (found in the Phase 0–2 re-review): an agent started with `pythonw` or Task Scheduler has no console, so Ctrl+C is impossible and killing it skips the clean shutdown. Add `sysmon --stop --output-dir DIR`, which asks the agent owning that directory's lock to stop (stop-request file checked every wait slice), waits for it, and reports the result.
-4. Error audit: wrap `main()` so an unexpected exception is logged with traceback to `agent.log` and exits 1; permission errors on disks/processes stay quiet-but-logged-once.
+Built:
+1. `logs.py` — `LineWriter` with size rotation (`name.1` … `name.N`) used for `metrics.jsonl`,
+   `alerts.log` and `agent.log` (via `LineWriterHandler`). Files are opened only per write — the
+   agent never holds a handle, which is what makes renaming safe on Windows (the usual
+   `RotatingFileHandler` *WinError 32* problem). A refused rename keeps appending and retries;
+   a deleted output folder is recreated; `agent.log`'s own errors go to stderr (no recursion).
+2. `instance.py` — `sysmon.lock` (PID + process start time, created with `O_EXCL`): a second agent
+   exits 5 naming the running one; dead or reused-PID locks are taken over with a warning.
+   `sysmon --stop --output-dir DIR` writes a stop request the agent checks every 0.25 s — the way
+   to stop a background agent (`pythonw`, Task Scheduler) that has no console.
+3. `agent.log`: start line (version, PID, folder, interval, rotation), threshold source, config
+   warnings, stale-lock takeover, and `agent stopped after N cycle(s) (reason)` with reason
+   `sysmon --stop` / `SIGINT` / `SIGBREAK` / `SIGTERM` / `--once`. Lock released on every path.
+4. Unexpected exception → one line on stderr, full traceback in `agent.log`, exit 1.
+5. `--max-log-mb` (0.01–1024) / `--backup-count` and the config `logging` section now apply.
 
-**Tests**
-- Rotation: tiny `max_log_mb` → backup files appear, count never exceeds `backup_count + 1`.
-- Lock file: second agent → exit 5; stale lock is taken over.
-- Shutdown: setting the stop event mid-wait ends the loop and closes files; handler raising during write doesn't crash the loop.
-- Exit codes 0/1/2/3/4/5 each covered.
+Tests: 171 unit tests (rotation 6, lock/stop 9, plus CLI exit 5, `--stop`, crash → exit 1).
 
-**Verify**
-- [ ] ruff + tests + CI green
-- [ ] e2e: tiny `--max-log-mb` → `.1 .2 .3` backups appear, never more
-- [ ] e2e: CTRL_BREAK_EVENT (Windows) / SIGTERM (Linux) and Ctrl+C all stop cleanly with the final log line; lock file removed
-- [ ] e2e: a second agent on the same `--output-dir` exits 5 with a clear message
-- [ ] e2e: output folder becomes unwritable mid-run → reported, agent keeps running or exits 3 cleanly
-- [ ] e2e: a detached `pythonw` agent is stopped with `sysmon --stop`: final log line written, lock removed, exit 0
+Verify (all passed 27 Oct, CI run on commit `178f55f`, 6/6 jobs, 81/81 checks per Windows job):
+- [x] ruff + tests + CI green on Windows + Linux, Py 3.10 / 3.12 / 3.14
+- [x] e2e: `--max-log-mb 0.01 --backup-count 2` → exactly `metrics.jsonl`, `.1`, `.2`; each file within the limit; cycles 1–8 all present across the files, none lost or split
+- [x] e2e: a **detached `pythonw` agent** (no console) is stopped by `sysmon --stop` in 0.3–0.4 s: exit 0, final `agent.log` line `(sysmon --stop)`, lock and stop request removed
+- [x] e2e: second agent on the same folder → exit 5, names the running PID, suggests `sysmon --stop`
+- [x] e2e: Ctrl+Break (Windows) / SIGTERM (Linux) → exit 0, final line with reason, lock removed
+- [x] e2e: hard kill (TerminateProcess / SIGKILL) leaves the lock; the next agent takes it over and logs that the previous one did not shut down cleanly
+- [x] e2e: output folder deleted mid-run → recreated, agent keeps writing, clean exit
+- [x] e2e: `agent.log` records start, "using built-in thresholds", and stop
+
+Known limitation: if the output folder is deleted while the agent runs, the lock file goes with it,
+so `sysmon --stop` cannot find that agent until it is restarted; stop it with Ctrl+C / Task Manager.
 
 ---
 
@@ -192,8 +200,8 @@ Re-review of Phase 3 (25 Oct, afternoon) — each bug reproduced first, then fix
 | FR-1, FR-2 | 1 | ✅ |
 | FR-3 … FR-6 | 2 | ✅ |
 | FR-7 … FR-11 | 3 | ✅ |
-| FR-12 | 1 (flags) / 2 (`--interval`, `--top-n`, `--once`) / 3 (`--threshold-config`, precedence) / 4 (log flags) | ◐ |
-| FR-13 … FR-16 | 4 | ☐ |
+| FR-12 | 1 / 2 / 3 / 4 (all flags wired, `--stop` added) | ✅ |
+| FR-13 … FR-16 | 4 | ✅ |
 | FR-17, FR-18 | 5 | ☐ |
 | NFR-1 … NFR-5 | checked in every phase | ◐ |
 

@@ -6,7 +6,7 @@
 | Deadline | **28 Oct 2026** — completed code, README with setup/run instructions, sample outputs |
 | Language | Python 3.10+ |
 | Primary demo OS | Windows 10/11 (CI also runs on Ubuntu) |
-| Status | Phases 0–3 done — see [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) |
+| Status | Phases 0–4 done — see [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) |
 
 ## 1. Problem
 
@@ -37,7 +37,7 @@ in a config file, and writes structured reports and alerts so a problem is visib
 | 1. Host discovery & static metrics | FR-1, FR-2 | 1 ✅ |
 | 2. Continuous polling & process inspection | FR-3, FR-4, FR-5, FR-6 | 2 ✅ |
 | 3. Health rules & alert engine | FR-7 … FR-11 | 3 ✅ |
-| 4. CLI flags & log management, error handling | FR-12 … FR-16 | 1 (CLI) ✅ / 4 |
+| 4. CLI flags & log management, error handling | FR-12 … FR-16 | 1 (CLI) ✅ / 4 ✅ |
 | Deliverables: README, sample outputs, regular commits | FR-17, FR-18 | 5 |
 
 ## 5. Functional requirements
@@ -61,10 +61,10 @@ in a config file, and writes structured reports and alerts so a problem is visib
 
 ### CLI, logs & resilience (Phase 1 CLI done; rest Phase 4)
 - **FR-12** Flags: `--interval`, `--threshold-config`, `--output-dir`, `--top-n`, `--once`, `--log-level`, `--max-log-mb`, `--backup-count`, `--version`. Precedence: **CLI flag > config file > built-in default.**
-- **FR-13** Log files: `agent.log` (diagnostics), `alerts.log` (breaches), `metrics.jsonl` (snapshots). Each rotates at `max_log_mb` (default 5 MB) keeping `backup_count` old files (default 3), so disk use is bounded (~4 × 5 MB × 3 files = 60 MB worst case).
+- **FR-13** Log files: `agent.log` (diagnostics), `alerts.log` (breaches), `metrics.jsonl` (snapshots). Each rotates at `max_log_mb` (default 5 MB) keeping `backup_count` old files (default 3), so disk use is bounded (~4 × 5 MB × 3 files = 60 MB worst case). Files are opened only for each write, so rotation works on Windows; if another program blocks a rename, writing continues and rotation is retried. A deleted output folder is recreated.
 - **FR-14** Graceful shutdown on Ctrl+C (SIGINT), Ctrl+Break (SIGBREAK, Windows) and SIGTERM (Linux), and — for a background agent with no console — on `sysmon --stop --output-dir DIR`: finish or abandon the current cycle, write a final "agent stopped" line, flush and close every log, exit 0. Losing the console (closed terminal, pipe reader gone, no console under `pythonw`) never stops monitoring.
 - **FR-15** Error handling: bad flags → exit 2; unwritable output dir or file → exit 3; bad config → exit 4; second agent on the same output dir → exit 5; a collector that throws is logged and recorded in that cycle's `errors` list while the other collectors still run; a full disk or locked log file is reported, not a crash. Unexpected errors → exit 1 with the traceback in `agent.log`.
-- **FR-16** Only one agent may write to an output directory at a time (lock file), because two writers rotating the same file on Windows fail with *WinError 32*.
+- **FR-16** Only one agent may write to an output directory at a time (`sysmon.lock` with PID and process start time; a second agent exits 5 and names the running one). A lock left by a crashed agent, or whose PID now belongs to another process, is taken over with a warning.
 
 ### Deliverables (Phase 5)
 - **FR-17** README: what it does, install, run (Windows + Linux), every flag, config reference, file formats, sample output, how to test, design notes, limitations.
