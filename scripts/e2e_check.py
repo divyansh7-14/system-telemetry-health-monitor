@@ -1,5 +1,9 @@
 """End-to-end checks: run the real agent and compare it with independent OS tools.
 
+Made for CI machines: it loads every CPU core, allocates 1 GB of RAM, downloads about
+19 MB, and (in CI only) creates and then deletes a temporary Windows account to test the
+agent as a standard user. Phases: phase1 phase2 phase3 phase4 robustness, or all.
+
 Unit tests fake psutil; this script does not. It runs ``python -m sysmon`` on the
 actual machine (a GitHub Actions Windows/Linux runner in CI) and cross-checks the
 numbers against PowerShell/CIM on Windows or /proc and df on Linux.
@@ -1195,6 +1199,20 @@ def robustness(out: Path, rep: Report) -> None:
     )
 
     # --- standard (non-admin) Windows user: the normal laptop case
+    # Creates (and afterwards deletes) a local Windows account, so it only runs on
+    # throwaway CI machines, never on someone's own PC.
+    if not IN_CI:
+        rep.info("standard-user check skipped: it creates a Windows account; runs in CI only")
+        return
+    try:
+        _standard_user_checks(rep)
+    finally:
+        run(["net", "user", NONADMIN_USER, "/delete"])
+        shutil.rmtree("C:/sysmon-e2e-user", ignore_errors=True)
+
+
+def _standard_user_checks(rep: Report) -> None:
+
     base = Path("C:/sysmon-e2e-user")
     base.mkdir(exist_ok=True)
     run(["icacls", str(base), "/grant", "Users:(OI)(CI)M", "/T", "/Q"])

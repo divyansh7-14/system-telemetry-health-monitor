@@ -97,6 +97,8 @@ if (-not $p.WaitForExit(120000)) { $p.Kill() }
 $result = ($out.Result + $err).Trim()
 Notice "Standard user registering the README task" $result
 Unregister-ScheduledTask -TaskName "sysmon-user-test" -Confirm:$false -ErrorAction SilentlyContinue
+net user $user /delete 2>&1 | Out-Null
+Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
 if ($result -notmatch '^REGISTERED') { throw "a standard user could not register the task: $result" }
 
 Write-Host "README instructions work as written."

@@ -181,6 +181,9 @@ load and finally stops the agent with `sysmon --stop`. The other rules keep thei
 and that machine's `C:` drive happened to have only 18.8 % free space, so the default
 `disk_min_free` rule (WARNING below 20 %) raised a real warning of its own, repeated every
 3 cycles while it lasted. That is why the cycles after the CPU recovers are still WARNING.
+Note the 09:24:01 line: CPU is already at 99.8 % but still only WARNING — that is the first
+cycle above the critical limit, and a breach must last 2 cycles in a row to be raised, so
+CRITICAL follows one cycle later.
 
 [`samples/alerts.log`](samples/alerts.log):
 
@@ -374,15 +377,17 @@ fixed, are in [docs/PRD.md](docs/PRD.md) and [docs/IMPLEMENTATION_PLAN.md](docs/
 
 ## Testing
 
-```bash
-pip install -r requirements-dev.txt
-ruff check .                       # lint
-pytest                             # unit tests (psutil faked, deterministic)
-python scripts/e2e_check.py all    # runs the real agent and cross-checks it with OS tools
+```powershell
+.venv\Scripts\python -m pip install -r requirements-dev.txt
+.venv\Scripts\python -m ruff check .                  # lint
+.venv\Scripts\python -m pytest                        # unit tests (psutil faked, deterministic)
+.venv\Scripts\python scripts\e2e_check.py phase1      # real-machine checks (phase1 ... phase4, all)
 ```
 
-GitHub Actions runs all three on **Windows and Ubuntu with Python 3.10, 3.12 and 3.14** on
-every push. The end-to-end checks compare the agent with independent sources —
+The end-to-end checks are made for CI machines: `all` loads every CPU core, allocates 1 GB
+of RAM and downloads about 19 MB (the standard-user test, which creates a temporary Windows
+account, only runs in CI). GitHub Actions runs all of it on **Windows and Ubuntu with
+Python 3.10, 3.12 and 3.14** on every push. The end-to-end checks compare the agent with independent sources —
 PowerShell/CIM on Windows, `/proc`, `df` and `ip` on Linux — and also run it under load, as
 a standard (non-administrator) Windows user, as a detached `pythonw` background process,
 with broken configuration files, with its output folder deleted mid-run, and after being
