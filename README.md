@@ -64,10 +64,11 @@ Windows commands below; on Linux use `.venv/bin/sysmon` and `/` in paths.
 Results go to `.\logs\` (change with `--output-dir`). Each cycle prints a short summary — here cycle 4 of the [Windows demo](#sample-output), where the CPU limit was crossed:
 
 ```text
-[#4 09:09:15 WARNING] CPU 78.1% | RAM 16.4% (2.6 GB/16.0 GB) | Disk C:\ 21% free, D:\ 98% free | Net rx 380 B/s tx 420 B/s  (27 ms)
-    ALERT WARNING  cpu_max            cpu                    value=78.1%   limit=50%   OK->WARNING
-    top CPU: python.exe[3588] 24.9%, python.exe[8332] 24.8%, python.exe[2164] 24.8%, WindowsTerminal.exe[3260] 2.2%, python.exe[8824] 0.1%
-    top MEM: explorer.exe[7416] 160.8 MB, MsMpEng.exe[4000] 158.6 MB, StartMenuExperienceHost.exe[5256] 134.1 MB, SearchHost.exe[6388] 114.2 MB, Runner.Worker.exe[8800] 97.4 MB
+[#4 09:23:41 WARNING] CPU 77.2% | RAM 16.6% (2.6 GB/16.0 GB) | Disk C:\ 19% free, D:\ 100% free | Net rx 1.3 KB/s tx 632 B/s  (20 ms)
+    ALERT WARNING  cpu_max            cpu                    value=77.2%   limit=50%   OK->WARNING
+    ALERT WARNING  disk_min_free      C:\                    value=18.8%   limit=20%   still WARNING (3 cycles)
+    top CPU: python.exe[3600] 24.9%, python.exe[9152] 24.9%, python.exe[1368] 24.8%, WindowsTerminal.exe[9052] 1.6%, System[4] 0.2%
+    top MEM: explorer.exe[6960] 160.8 MB, MsMpEng.exe[3980] 159.1 MB, StartMenuExperienceHost.exe[7948] 133.9 MB, SearchHost.exe[8072] 113.5 MB, Runner.Worker.exe[3432] 96.9 MB
 ```
 
 To see alerts quickly, run the agent with the demo limits and load the CPU from a second
@@ -176,25 +177,33 @@ The [`samples/`](samples) folder holds the complete, unedited output of
 [`scripts/demo.py`](scripts/demo.py), captured on a GitHub Actions **Windows Server 2025**
 machine (4 logical cores, 16 GB). The demo uses [`config/demo.yaml`](config/demo.yaml)
 (CPU limits 50 % / 80 %), loads about 70 % of the cores, then all of them, then stops the
-load and finally stops the agent with `sysmon --stop`.
+load and finally stops the agent with `sysmon --stop`. The other rules keep their defaults —
+and that machine's `C:` drive happened to have only 18.8 % free space, so the default
+`disk_min_free` rule (WARNING below 20 %) raised a real warning of its own, repeated every
+3 cycles while it lasted. That is why the cycles after the CPU recovers are still WARNING.
 
 [`samples/alerts.log`](samples/alerts.log):
 
 ```text
-2026-10-27T09:09:15+00:00 WARNING  cpu_max            cpu                    value=78.1%   limit=50%   OK->WARNING
-2026-10-27T09:09:35+00:00 WARNING  cpu_max            cpu                    value=99.7%   limit=50%   still WARNING (3 cycles)
-2026-10-27T09:09:45+00:00 CRITICAL cpu_max            cpu                    value=100.0%  limit=80%   WARNING->CRITICAL
-2026-10-27T09:10:05+00:00 CRITICAL cpu_max            cpu                    value=100.0%  limit=80%   still CRITICAL (3 cycles)
-2026-10-27T09:10:25+00:00 OK       cpu_max            cpu                    value=5.7%    limit=50%   CRITICAL->OK
+2026-10-27T09:23:21+00:00 WARNING  disk_min_free      C:\                    value=18.8%   limit=20%   OK->WARNING
+2026-10-27T09:23:41+00:00 WARNING  cpu_max            cpu                    value=77.2%   limit=50%   OK->WARNING
+2026-10-27T09:23:41+00:00 WARNING  disk_min_free      C:\                    value=18.8%   limit=20%   still WARNING (3 cycles)
+2026-10-27T09:24:01+00:00 WARNING  cpu_max            cpu                    value=99.8%   limit=50%   still WARNING (3 cycles)
+2026-10-27T09:24:11+00:00 CRITICAL cpu_max            cpu                    value=100.0%  limit=80%   WARNING->CRITICAL
+2026-10-27T09:24:11+00:00 WARNING  disk_min_free      C:\                    value=18.8%   limit=20%   still WARNING (6 cycles)
+2026-10-27T09:24:31+00:00 CRITICAL cpu_max            cpu                    value=100.0%  limit=80%   still CRITICAL (3 cycles)
+2026-10-27T09:24:41+00:00 WARNING  disk_min_free      C:\                    value=18.8%   limit=20%   still WARNING (9 cycles)
+2026-10-27T09:24:51+00:00 OK       cpu_max            cpu                    value=4.0%    limit=50%   CRITICAL->OK
+2026-10-27T09:25:11+00:00 WARNING  disk_min_free      C:\                    value=18.8%   limit=20%   still WARNING (12 cycles)
 ```
 
 [`samples/agent.log`](samples/agent.log):
 
 ```text
-2026-10-27T09:08:43+0000 INFO    sysmon: agent started: sysmon 0.1.0, PID 8824, output D:\a\system-telemetry-health-monitor\system-telemetry-health-monitor\samples, interval 10s, top 5, logs rotate at 5 MB x 3
-2026-10-27T09:08:43+0000 INFO    sysmon: thresholds loaded from D:\a\system-telemetry-health-monitor\system-telemetry-health-monitor\config\demo.yaml
-2026-10-27T09:10:45+0000 INFO    sysmon.agent: stop requested with 'sysmon --stop'
-2026-10-27T09:10:45+0000 INFO    sysmon: agent stopped after 13 cycle(s) (sysmon --stop)
+2026-10-27T09:23:10+0000 INFO    sysmon: agent started: sysmon 1.0.0, PID 2948, output D:\a\system-telemetry-health-monitor\system-telemetry-health-monitor\samples, interval 10s, top 5, logs rotate at 5 MB x 3
+2026-10-27T09:23:10+0000 INFO    sysmon: thresholds loaded from D:\a\system-telemetry-health-monitor\system-telemetry-health-monitor\config\demo.yaml
+2026-10-27T09:25:11+0000 INFO    sysmon.agent: stop requested with 'sysmon --stop'
+2026-10-27T09:25:11+0000 INFO    sysmon: agent stopped after 13 cycle(s) (sysmon --stop)
 ```
 
 Cycle 4 of [`samples/metrics.jsonl`](samples/metrics.jsonl) (one line in the file), laid out
@@ -202,47 +211,50 @@ for reading, with the process, adapter and check lists shortened:
 
 ```json
 {
-  "timestamp": "2026-10-27T09:09:15+00:00",
+  "timestamp": "2026-10-27T09:23:41+00:00",
   "cycle": 4,
-  "duration_ms": 27,
-  "cpu": {"percent": 78.1, "per_core_percent": [62.6, 78.6, 83.9, 87.6], "load_average": [0.0, 0.0, 0.0]},
+  "duration_ms": 20,
+  "cpu": {"percent": 77.2, "per_core_percent": [65.7, 68.9, 85.2, 89.2], "load_average": [0.07, 0.02, 0.01]},
   "memory": {
     "total_bytes": 17174360064,
-    "used_bytes": 2820968448,
-    "available_bytes": 14353391616,
-    "percent": 16.4,
+    "used_bytes": 2842628096,
+    "available_bytes": 14331731968,
+    "percent": 16.6,
     "swap_total_bytes": 3087007744,
     "swap_used_bytes": 0,
     "swap_percent": 0.0
   },
   "disks": [
-    {"device": "C:\\", "mountpoint": "C:\\", "fstype": "NTFS", "total_bytes": 160939618304, "used_bytes": 127608418304, "free_bytes": 33331200000, "used_percent": 79.3, "free_percent": 20.7},
-    {"device": "D:\\", "mountpoint": "D:\\", "fstype": "NTFS", "total_bytes": 161059172352, "used_bytes": 3215233024, "free_bytes": 157843939328, "used_percent": 2.0, "free_percent": 98.0}
+    {"device": "C:\\", "mountpoint": "C:\\", "fstype": "NTFS", "total_bytes": 160939618304, "used_bytes": 130701672448, "free_bytes": 30237945856, "used_percent": 81.2, "free_percent": 18.8},
+    {"device": "D:\\", "mountpoint": "D:\\", "fstype": "NTFS", "total_bytes": 236205371392, "used_bytes": 129351680, "free_bytes": 236076019712, "used_percent": 0.1, "free_percent": 99.9}
   ],
   "network": {
-    "bytes_sent": 2076364,
-    "bytes_recv": 2631586,
-    "sent_bps": 419.7,
-    "recv_bps": 380.4,
+    "bytes_sent": 2097000,
+    "bytes_recv": 2589940,
+    "sent_bps": 632.2,
+    "recv_bps": 1355.8,
     "counted_interface": "Ethernet 4",
     "primary_interface": "Ethernet 4",
-    "primary_ip": "10.1.0.124",
-    "interfaces": [{"name": "Ethernet 4", "mac": "00:22:48:04:9E:F7", "ipv4": ["10.1.0.124"], "ipv6": ["fe80::74b6:4ff9:6ec4:5dab"], "is_up": true, "is_loopback": false, "speed_mbps": 4294, "bytes_sent": 2076364, "bytes_recv": 2631586}]
+    "primary_ip": "10.1.0.74",
+    "interfaces": [{"name": "Ethernet 4", "mac": "7C:ED:8D:81:97:CC", "ipv4": ["10.1.0.74"], "ipv6": ["fe80::6121:c8b1:c7c0:7868"], "is_up": true, "is_loopback": false, "speed_mbps": null, "bytes_sent": 2097000, "bytes_recv": 2589940}]
   },
   "top_processes": {
-    "by_cpu": [{"pid": 3588, "name": "python.exe", "username": "runnervmdaln5\\runneradmin", "cpu_percent": 24.9, "memory_rss_bytes": 19189760, "memory_percent": 0.11}, {"pid": 8332, "name": "python.exe", "username": "runnervmdaln5\\runneradmin", "cpu_percent": 24.8, "memory_rss_bytes": 19382272, "memory_percent": 0.11}],
-    "by_memory": [{"pid": 7416, "name": "explorer.exe", "username": "runnervmdaln5\\runneradmin", "cpu_percent": 0.0, "memory_rss_bytes": 168599552, "memory_percent": 0.98}],
-    "total_processes": 148
+    "by_cpu": [{"pid": 3600, "name": "python.exe", "username": "runnervmdaln5\\runneradmin", "cpu_percent": 24.9, "memory_rss_bytes": 19128320, "memory_percent": 0.11}, {"pid": 9152, "name": "python.exe", "username": "runnervmdaln5\\runneradmin", "cpu_percent": 24.9, "memory_rss_bytes": 19398656, "memory_percent": 0.11}],
+    "by_memory": [{"pid": 6960, "name": "explorer.exe", "username": "runnervmdaln5\\runneradmin", "cpu_percent": 0.1, "memory_rss_bytes": 168570880, "memory_percent": 0.98}],
+    "total_processes": 150
   },
   "errors": [],
   "status": "WARNING",
   "checks": [
-    {"rule": "cpu_max", "target": "cpu", "value": 78.1, "status": "WARNING", "limit": 50.0},
-    {"rule": "disk_min_free", "target": "C:\\", "value": 20.7, "status": "OK", "limit": 20},
-    {"rule": "disk_min_free", "target": "D:\\", "value": 98.0, "status": "OK", "limit": 20}
+    {"rule": "cpu_max", "target": "cpu", "value": 77.2, "status": "WARNING", "limit": 50.0},
+    {"rule": "memory_max", "target": "memory", "value": 16.6, "status": "OK", "limit": 80.0},
+    {"rule": "swap_max", "target": "swap", "value": 0.0, "status": "OK", "limit": 50.0},
+    {"rule": "disk_min_free", "target": "C:\\", "value": 18.8, "status": "WARNING", "limit": 20.0},
+    {"rule": "disk_min_free", "target": "D:\\", "value": 99.9, "status": "OK", "limit": 20.0}
   ],
   "alerts": [
-    {"timestamp": "2026-10-27T09:09:15+00:00", "rule": "cpu_max", "target": "cpu", "status": "WARNING", "previous": "OK", "value": 78.1, "limit": 50.0, "note": "OK->WARNING"}
+    {"timestamp": "2026-10-27T09:23:41+00:00", "rule": "cpu_max", "target": "cpu", "status": "WARNING", "previous": "OK", "value": 77.2, "limit": 50.0, "note": "OK->WARNING"},
+    {"timestamp": "2026-10-27T09:23:41+00:00", "rule": "disk_min_free", "target": "C:\\", "status": "WARNING", "previous": "WARNING", "value": 18.8, "limit": 20.0, "note": "still WARNING (3 cycles)"}
   ]
 }
 ```
@@ -261,8 +273,8 @@ for reading, with the process, adapter and check lists shortened:
   "cpu_physical_cores": 2,
   "cpu_logical_cores": 4,
   "total_memory_bytes": 17174360064,
-  "boot_time": "2026-10-27T09:06:32+00:00",
-  "uptime_seconds": 131
+  "boot_time": "2026-10-27T09:20:26+00:00",
+  "uptime_seconds": 163
 }
 ```
 

@@ -28,7 +28,7 @@ start the next phase.
 | 2 | Polling loop, top processes, network, `metrics.jsonl` | ✅ done 22 Oct — verified on Windows + Linux (68 unit tests, 43 e2e checks on Windows) |
 | 3 | Config loader, rules engine, statuses, `alerts.log` | ✅ done 25 Oct — verified on Windows + Linux (136 unit tests, 70 e2e checks on Windows) |
 | 4 | Log rotation, graceful shutdown, error handling, lock file | ✅ done 27 Oct — verified on Windows + Linux (171 unit tests, 81 e2e checks on Windows) |
-| 5 | Windows demo, `samples/`, full README, `v1.0.0` tag | Mon 26 – Tue 27 Oct |
+| 5 | Windows demo, `samples/`, full README, `v1.0.0` tag | ✅ done 27 Oct |
 | — | Buffer / review | Wed 28 Oct (deadline) |
 
 ---
@@ -179,19 +179,56 @@ so `sysmon --stop` cannot find that agent until it is restarted; stop it with Ct
 
 ---
 
-## Phase 5 — Demo, samples, documentation, release
+## Phase 5 — Demo, samples, documentation, release ✅
 
-**Build**
-1. Windows demo run (15–20 min) with a demo config that triggers alerts: CPU load script for WARNING→CRITICAL→OK; copy outputs into `samples/`.
-2. `scripts/cpu_burn.py` — small helper to create load for the demo (stops on its own after N seconds).
-3. README: overview, features mapped to the brief, install, quick start (Windows PowerShell + Linux), all flags, config reference, output formats with real excerpts, running in background (`pythonw` / Task Scheduler), architecture diagram, testing, limitations, licence.
-4. Bump version to 1.0.0, tag `v1.0.0`, GitHub release notes.
+Built:
+1. `scripts/demo.py` + `config/demo.yaml` — runs the real agent through idle, ~70 % and 100 % CPU and
+   back, then stops it with `sysmon --stop`. `scripts/cpu_burn.py` — self-stopping CPU load.
+2. `.github/workflows/demo.yml` (run by hand): the demo on `windows-latest`, outputs published to the
+   `demo-samples` branch for review; `readme-windows` runs `scripts/readme_check.ps1` — the README's
+   Windows commands verbatim in Windows PowerShell 5.1 on a fresh clone; `readme-linux` likewise.
+   `tests/test_readme.py` fails if the README and that script drift apart, or a linked file is missing.
+3. `samples/` — unedited output of the v1.0.0 demo on a Windows Server 2025 runner (demo run
+   40480317191): `host_info.json`, `metrics.jsonl` (13 cycles), `alerts.log`, `agent.log`, `console_output.txt`.
+4. README rewritten in full, with excerpts taken from `samples/`. Version 1.0.0, tag `v1.0.0`, release.
 
-**Verify (final acceptance)**
-- [ ] Fresh clone on Windows → follow README word for word → it runs
-- [ ] Every PRD requirement ticked in the table below
-- [ ] `samples/` contains host_info.json, metrics.jsonl, alerts.log (WARNING + CRITICAL + recovery), agent.log, console output
-- [ ] CI green, tag pushed, repo public, regular commit history
+Found by reading the Windows demo output, fixed, and covered by tests:
+- **New processes were invisible in the top-CPU list for their first cycle** (76 % total CPU, top list
+  showing 2 %): a process with no previous reading is now measured from its own start. e2e on all six
+  machines: a process started mid-interval is #1 in the next cycle.
+- `scripts/cpu_burn.py`: killing the helper left its workers burning CPU; workers now exit with it.
+- Windows "unknown" link speed (0xFFFFFFFF bit/s → 4294 Mbit/s) reported as null.
+- Built-in limits were integers while file limits were floats (`"limit": 20` next to `50.0`).
+- Long adapter names were cut at 14 characters in the console table.
+
+Verify (final acceptance, 27 Oct):
+- [x] Fresh clone on Windows → README followed word for word → install, `--once`, background `pythonw`
+      agent stopped with `--stop`, and the Task Scheduler setup all work (run 40480317191, job
+      `readme-windows`, evidence: three clean start/stop pairs in `agent.log`); Linux install likewise
+- [x] Every PRD requirement ticked in the table below
+- [x] `samples/` has `host_info.json`, `metrics.jsonl`, `alerts.log` (CPU OK→WARNING, still WARNING,
+      →CRITICAL, still CRITICAL, →OK — plus a real disk WARNING from the runner's 18.8 % free C: drive),
+      `agent.log`, console output
+- [x] CI green on Windows + Linux × Py 3.10/3.12/3.14 (181 unit tests; 84 e2e checks per Windows job,
+      70 per Linux job), repo public, regular commit history, tag `v1.0.0`
+
+### Final check against the brief
+
+| Brief | Where | Verified by |
+|---|---|---|
+| OS version, architecture, uptime | `host_info.json` | e2e vs CIM (`Win32_OperatingSystem`) |
+| Total/used RAM, CPU %, disk usage | every cycle in `metrics.jsonl` | e2e vs CIM / `/proc` / `df`; CPU under load |
+| Timed loop every 10–30 s | `--interval`, config `interval` | e2e: cycles exactly 10 s apart |
+| Top CPU and memory consumers | `top_processes` | e2e: busy process #1 by CPU, 1 GiB hog #1 by memory, new process visible at once |
+| IP address, MAC address, bytes sent/received | `network` | e2e vs `Get-NetAdapter(Statistics)` / `ip -j`; 18.9 MB download counted once |
+| `config.json` or `.yaml`, e.g. `cpu_max: 85%`, `disk_min_free: 15%` | `config.py` | e2e: brief-style config understood; broken configs exit 4 |
+| Status flags OK / WARNING / CRITICAL | `status`, `checks` | e2e: exact alert sequence under staged load |
+| Breach events → `alerts.log` | `alerts.log` | e2e + `samples/alerts.log` |
+| `--interval`, `--threshold-config`, `--output-dir` | `cli.py` | unit + e2e |
+| Log management for file sizes | rotation | e2e: exactly N backups, each within the limit, no line lost |
+| Graceful shutdowns | Ctrl+C / Ctrl+Break / SIGTERM / `--stop` | e2e: clean final line, lock removed, exit 0 |
+| Permission issues | unwritable folder (exit 3), standard user, protected processes | e2e as a non-admin Windows user |
+| Public repo, regular commits, README, sample outputs, by 28 Oct | this repository | done 27 Oct |
 
 ## Requirement tracker
 
@@ -202,8 +239,8 @@ so `sysmon --stop` cannot find that agent until it is restarted; stop it with Ct
 | FR-7 … FR-11 | 3 | ✅ |
 | FR-12 | 1 / 2 / 3 / 4 (all flags wired, `--stop` added) | ✅ |
 | FR-13 … FR-16 | 4 | ✅ |
-| FR-17, FR-18 | 5 | ☐ |
-| NFR-1 … NFR-5 | checked in every phase | ◐ |
+| FR-17, FR-18 | 5 | ✅ |
+| NFR-1 … NFR-5 | checked in every phase (overhead ~1–2 % of one core, ~30 MB RAM on Windows) | ✅ |
 
 ## Working agreement
 - Work directly on `main` in small commits with clear messages; one phase is closed before the next starts.

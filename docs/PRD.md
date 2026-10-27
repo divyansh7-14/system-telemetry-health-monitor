@@ -6,7 +6,7 @@
 | Deadline | **28 Oct 2026** — completed code, README with setup/run instructions, sample outputs |
 | Language | Python 3.10+ |
 | Primary demo OS | Windows 10/11 (CI also runs on Ubuntu) |
-| Status | Phases 0–4 done — see [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) |
+| Status | **v1.0.0 — complete** (all phases done and verified) — see [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) |
 
 ## 1. Problem
 
@@ -38,7 +38,7 @@ in a config file, and writes structured reports and alerts so a problem is visib
 | 2. Continuous polling & process inspection | FR-3, FR-4, FR-5, FR-6 | 2 ✅ |
 | 3. Health rules & alert engine | FR-7 … FR-11 | 3 ✅ |
 | 4. CLI flags & log management, error handling | FR-12 … FR-16 | 1 (CLI) ✅ / 4 ✅ |
-| Deliverables: README, sample outputs, regular commits | FR-17, FR-18 | 5 |
+| Deliverables: README, sample outputs, regular commits | FR-17, FR-18 | 5 ✅ |
 
 ## 5. Functional requirements
 
