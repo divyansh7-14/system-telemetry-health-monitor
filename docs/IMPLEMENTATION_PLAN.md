@@ -190,7 +190,7 @@ Built:
    `tests/test_readme.py` fails if the README and that script drift apart, or a linked file is missing.
 3. `samples/` — unedited output of the v1.0.0 demo on a Windows Server 2025 runner (demo run
    40480317191): `host_info.json`, `metrics.jsonl` (13 cycles), `alerts.log`, `agent.log`, `console_output.txt`.
-4. README rewritten in full, with excerpts taken from `samples/`. Version 1.0.0 (release commit `1ad3f0c`).
+4. README rewritten in full, with excerpts taken from `samples/`. Version 1.0.0 (release from the latest `main`).
    The `v1.0.0` tag and GitHub release are created by the repo owner (this build session may not create
    tags or releases); release notes are ready.
 
@@ -212,7 +212,37 @@ Verify (final acceptance, 27 Oct):
       →CRITICAL, still CRITICAL, →OK — plus a real disk WARNING from the runner's 18.8 % free C: drive),
       `agent.log`, console output
 - [x] CI green on Windows + Linux × Py 3.10/3.12/3.14 (181 unit tests; 84 e2e checks per Windows job,
-      70 per Linux job) on release commit `1ad3f0c`, repo public, regular commit history
+      70 per Linux job), repo public, regular commit history
+
+### Final re-review of all phases (27 Oct, afternoon)
+
+Each bug was reproduced on a real run first, then fixed, covered by a test, and verified on
+Windows + Linux (CI run 40492048109: 6/6 jobs, 84/84 and 70/70 e2e; README check run 40492069597).
+
+Phase 4:
+- An unexpected crash printed a **full traceback** on the console, and `agent.log` recorded the stop
+  as `(--once)`, before the error. Now: one line on screen naming the `agent.log` path; the
+  traceback goes to `agent.log` only; the stop reason is `unexpected error`.
+- Two agents starting at the same moment shared one `.write_test` probe file: in 1 of 8 tries the
+  loser exited 3 "cannot write to output directory" instead of 5. The probe is now per process
+  (12/12 correct afterwards).
+- A deleted output folder took the lock file with it, so `sysmon --stop` could not find the agent
+  (the "known limitation"). The agent now re-checks its lock every cycle and recreates it; if a
+  different live agent has taken the folder, it stops. e2e: deleted folder → stopped with `--stop`.
+- `--stop` without permission to write the stop request ended in "unexpected error"; now a clear
+  message (run it as the agent's user) and exit 3.
+
+Phase 5:
+- **`scripts/demo.py` deleted every file in `--output-dir`** — pointed at a documents folder it
+  would have destroyed them. It now removes only its own output files (tested).
+- **README Task Scheduler setup used Windows' defaults**, proven on Windows to be
+  `DisallowStartIfOnBatteries=True, StopIfGoingOnBatteries=True, ExecutionTimeLimit=PT72H`: on a
+  laptop the agent would not start on battery, would be killed when unplugged, and would be ended
+  after 3 days. The README now sets `-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+  -ExecutionTimeLimit 0`; the README check verifies the settings and that a **standard user can
+  register the task** (`REGISTERED as sysmonreadme`).
+
+Tests after the re-review: 206 unit tests.
 
 ### Final check against the brief
 
