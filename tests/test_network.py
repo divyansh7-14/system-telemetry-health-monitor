@@ -161,3 +161,14 @@ def test_real_machine_smoke():
     stats = NetworkSampler().sample()
     assert stats.bytes_recv >= 0 and stats.interfaces
     assert any(i.is_loopback for i in stats.interfaces) or stats.primary_ip
+
+
+@pytest.mark.parametrize(
+    ("speed", "expected"), [(1000, 1000), (0, None), (4294, None), (4295, None)]
+)
+def test_unknown_link_speed_is_none(fake_net, monkeypatch, speed, expected):
+    """Windows reports 'unknown' as 0xFFFFFFFF bit/s = 4294 Mbit/s (seen in the demo)."""
+    stats = {"Ethernet": Stat(True, 2, speed, 1500)}
+    monkeypatch.setattr(psutil, "net_if_stats", lambda: stats)
+    eth = {i.name: i for i in NetworkSampler().sample().interfaces}["Ethernet"]
+    assert eth.speed_mbps == expected

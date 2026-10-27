@@ -81,13 +81,13 @@ class LoggingConfig:
     backup_count: int = 3
 
 
-DEFAULT_THRESHOLDS: dict[str, Threshold] = {
-    "cpu_max": Threshold(75, 85),
-    "memory_max": Threshold(80, 90),
-    "swap_max": Threshold(50, 80),
-    "disk_min_free": Threshold(20, 15),
-    "process_cpu_max": Threshold(50, 80),
-    "process_memory_max": Threshold(25, 40),
+DEFAULT_THRESHOLDS: dict[str, Threshold] = {  # floats, like values read from a file
+    "cpu_max": Threshold(75.0, 85.0),
+    "memory_max": Threshold(80.0, 90.0),
+    "swap_max": Threshold(50.0, 80.0),
+    "disk_min_free": Threshold(20.0, 15.0),
+    "process_cpu_max": Threshold(50.0, 80.0),
+    "process_memory_max": Threshold(25.0, 40.0),
 }
 
 

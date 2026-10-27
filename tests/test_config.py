@@ -215,3 +215,10 @@ def test_non_percent_settings_do_not_suggest_percent(tmp_path):
 def test_recovery_margin_may_be_written_as_percent(tmp_path):
     cfg = load_config(write(tmp_path, "c.yaml", "alerting: {recovery_margin: 3%}\n"))
     assert cfg.alerting.recovery_margin == 3.0
+
+
+def test_limits_are_always_floats(tmp_path):
+    """metrics.jsonl showed 'limit': 20 next to 'limit': 50.0; keep the type consistent."""
+    for cfg in (Config(), load_config(write(tmp_path, "c.yaml", "thresholds:\n  cpu_max: 85\n"))):
+        for t in cfg.thresholds.values():
+            assert all(v is None or type(v) is float for v in (t.warning, t.critical))

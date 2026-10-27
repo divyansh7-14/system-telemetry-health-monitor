@@ -24,6 +24,17 @@ from sysmon.models import InterfaceInfo, NetworkStats
 log = logging.getLogger(__name__)
 
 _AF_LINK = getattr(psutil, "AF_LINK", -1)
+# Windows reports an unknown link speed as 0xFFFFFFFF bit/s, which psutil turns
+# into 4294 Mbit/s (seen on every adapter of the Windows demo). Report None instead.
+_UNKNOWN_SPEEDS = {4294, 4295}
+
+
+def _speed(st) -> int | None:
+    if st is None or not st.speed or st.speed in _UNKNOWN_SPEEDS:
+        return None
+    return st.speed
+
+
 # Any routable address works: connect() on a UDP socket sends no packets, it only
 # asks the OS which local address it would use for the default route.
 _ROUTE_PROBE = ("192.0.2.1", 9)  # TEST-NET-1 (RFC 5737), never actually contacted
@@ -135,7 +146,7 @@ def collect_interfaces() -> list[InterfaceInfo]:
                 ipv6=ipv6,
                 is_up=bool(st.isup) if st else False,
                 is_loopback=_is_loopback(name, ipv4, ipv6),
-                speed_mbps=(st.speed or None) if st else None,
+                speed_mbps=_speed(st),
                 bytes_sent=nic.bytes_sent if nic else None,
                 bytes_recv=nic.bytes_recv if nic else None,
             )

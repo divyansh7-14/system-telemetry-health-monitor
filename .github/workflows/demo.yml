@@ -32,3 +32,32 @@ jobs:
           git add -f samples
           git commit -m "Windows demo samples from run ${{ github.run_id }}"
           git push -f origin demo-samples
+
+  readme-windows:
+    # Follows the README's Windows instructions word for word on a fresh machine,
+    # in Windows PowerShell 5.1 (what Windows 10/11 ship with).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: README instructions (clone, install, run, background, --stop, Task Scheduler)
+        shell: powershell
+        run: scripts\readme_check.ps1
+
+  readme-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: README Linux install
+        run: |
+          cd "$RUNNER_TEMP"
+          git clone https://github.com/divyansh7-14/system-telemetry-health-monitor.git
+          cd system-telemetry-health-monitor
+          python3 -m venv .venv
+          .venv/bin/python -m pip install .
+          .venv/bin/sysmon --once
+          test "$(wc -l < logs/metrics.jsonl)" -eq 1
