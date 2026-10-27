@@ -301,11 +301,15 @@ second), and `agent.log` ends with `agent stopped after N cycle(s) (sysmon --sto
 **Start automatically at log-on (Task Scheduler)** — run in PowerShell from the project folder:
 
 ```powershell
-$action  = New-ScheduledTaskAction -Execute "$PWD\.venv\Scripts\pythonw.exe" -Argument "-m sysmon --output-dir `"$PWD\logs`" --threshold-config `"$PWD\config\config.yaml`""
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-Register-ScheduledTask -TaskName "sysmon-agent" -Action $action -Trigger $trigger
+$action   = New-ScheduledTaskAction -Execute "$PWD\.venv\Scripts\pythonw.exe" -Argument "-m sysmon --output-dir `"$PWD\logs`" --threshold-config `"$PWD\config\config.yaml`""
+$trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+Register-ScheduledTask -TaskName "sysmon-agent" -Action $action -Trigger $trigger -Settings $settings
 Start-ScheduledTask -TaskName "sysmon-agent"
 ```
+
+The `$settings` line matters on a laptop: by default Windows does not start a scheduled task
+on battery power, stops it when the charger is unplugged, and ends it after 3 days.
 
 Stop it with `sysmon --stop` as above; remove the task with
 `Unregister-ScheduledTask -TaskName "sysmon-agent" -Confirm:$false`.
@@ -392,9 +396,6 @@ the commands in this README on a fresh Windows machine, including the Task Sched
 - No GPU, temperature or battery metrics, and no remote notifications (email/Slack): alerts
   are written to `alerts.log`.
 - Swap on Windows means the page file.
-- If the output folder is deleted while the agent runs, the agent recreates it and keeps
-  going, but `sysmon --stop` can no longer find that agent (its lock file went with the
-  folder); stop it with Ctrl+C or Task Manager.
 
 ## License
 

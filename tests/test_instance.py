@@ -92,3 +92,59 @@ def test_stop_check_ends_the_agent_loop(tmp_path, monkeypatch):
     assert time.monotonic() - t0 < 2.0 and a.stop_reason == "sysmon --stop"
     lock.release()
     assert not (tmp_path / "sysmon.stop").exists()
+
+
+def test_ensure_recreates_a_deleted_lock(tmp_path):
+    folder = tmp_path / "logs"
+    folder.mkdir()
+    lock = InstanceLock(folder)
+    lock.acquire()
+    import shutil
+
+    shutil.rmtree(folder)  # someone deleted the output folder
+    assert lock.ensure() is True
+    owner = read_owner(folder)
+    assert owner is not None and owner.pid == os.getpid()  # --stop can find us again
+    assert request_stop(folder, timeout=0.3)[0] == "timeout"  # found (nobody polls in this test)
+    lock.release()
+
+
+def test_ensure_reports_a_different_live_owner(tmp_path):
+    lock = InstanceLock(tmp_path)
+    lock.acquire()
+    parent = psutil.Process(os.getppid())
+    fake_lock(tmp_path, parent.pid, parent.create_time())  # another agent took the folder
+    assert lock.ensure() is False
+
+
+def test_ensure_replaces_a_dead_owner(tmp_path):
+    lock = InstanceLock(tmp_path)
+    lock.acquire()
+    fake_lock(tmp_path, 999_999_9, 1.0)
+    assert lock.ensure() is True and read_owner(tmp_path).pid == os.getpid()
+
+
+def test_agent_stops_when_another_agent_takes_the_folder(tmp_path, monkeypatch):
+    from sysmon import agent as agent_mod
+    from sysmon import cli
+    from sysmon.agent import Agent
+
+    monkeypatch.setattr(agent_mod, "WARMUP_SECONDS", 0.0)
+    lock = InstanceLock(tmp_path)
+    lock.acquire()
+    holder = {}
+    a = Agent(
+        tmp_path, interval=0.3, top_n=1, before_cycle=lambda: cli._keep_lock(lock, holder["a"])
+    )
+    holder["a"] = a
+    real = a.run_cycle
+
+    def cycle_then_hijack():
+        snap = real()
+        parent = psutil.Process(os.getppid())
+        fake_lock(tmp_path, parent.pid, parent.create_time())
+        return snap
+
+    a.run_cycle = cycle_then_hijack
+    assert a.run() == 1
+    assert a.stop_reason == "another agent took over the folder"

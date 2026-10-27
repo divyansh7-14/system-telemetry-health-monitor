@@ -174,8 +174,8 @@ Verify (all passed 27 Oct, CI run on commit `178f55f`, 6/6 jobs, 81/81 checks pe
 - [x] e2e: output folder deleted mid-run → recreated, agent keeps writing, clean exit
 - [x] e2e: `agent.log` records start, "using built-in thresholds", and stop
 
-Known limitation: if the output folder is deleted while the agent runs, the lock file goes with it,
-so `sysmon --stop` cannot find that agent until it is restarted; stop it with Ctrl+C / Task Manager.
+~~Known limitation: a deleted output folder took the lock file with it, so `sysmon --stop` could not
+find the agent.~~ Fixed in the final re-review: the agent re-checks its lock every cycle and recreates it.
 
 ---
 

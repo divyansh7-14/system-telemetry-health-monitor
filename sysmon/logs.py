@@ -137,6 +137,26 @@ class LineWriter:
         self._checked_tail = True  # the new file starts empty
 
 
+FILE_ONLY = {"file_only": True}  # pass as extra= for records the console must not show
+
+
+class _NotFileOnly(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not getattr(record, "file_only", False)
+
+
+class _OneLineFormatter(logging.Formatter):
+    """Console format: never a traceback (those go to agent.log only)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        saved = record.exc_info, record.exc_text, record.stack_info
+        record.exc_info = record.exc_text = record.stack_info = None
+        try:
+            return super().format(record)
+        finally:
+            record.exc_info, record.exc_text, record.stack_info = saved
+
+
 class LineWriterHandler(logging.Handler):
     """logging handler for agent.log built on LineWriter (same rotation rules).
 
@@ -164,7 +184,8 @@ def setup_logging(level: str, agent_log: Path | None, max_bytes: int | None, bac
         h.close()
     if sys.stderr is not None:
         console = logging.StreamHandler(sys.stderr)
-        console.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        console.setFormatter(_OneLineFormatter("%(levelname)s %(name)s: %(message)s"))
+        console.addFilter(_NotFileOnly())
         root.addHandler(console)
     file_handler = None
     if agent_log is not None:

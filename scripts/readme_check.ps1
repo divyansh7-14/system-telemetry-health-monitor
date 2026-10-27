@@ -40,10 +40,24 @@ if ((LastLine logs\agent.log) -notmatch '\(sysmon --stop\)') { throw "agent.log 
 if (Test-Path logs\sysmon.lock) { throw "lock file left behind" }
 
 Write-Host "== Task Scheduler"
+function Notice($title, $text) { Write-Output ("::notice title=$title::" + ($text -replace '%', '%25' -replace "`r?`n", '%0A')) }
+function Describe($s) { "DisallowStartIfOnBatteries=$($s.DisallowStartIfOnBatteries) StopIfGoingOnBatteries=$($s.StopIfGoingOnBatteries) ExecutionTimeLimit=$($s.ExecutionTimeLimit)" }
+
+# Evidence for the README's warning: what Windows does when no settings are given.
+$probe = Register-ScheduledTask -TaskName "sysmon-defaults-probe" -Action (New-ScheduledTaskAction -Execute "cmd.exe") -Trigger (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME)
+Notice "Task Scheduler defaults without -Settings" (Describe $probe.Settings)
+Unregister-ScheduledTask -TaskName "sysmon-defaults-probe" -Confirm:$false
+
 $before = Lines logs\metrics.jsonl
-$action  = New-ScheduledTaskAction -Execute "$PWD\.venv\Scripts\pythonw.exe" -Argument "-m sysmon --output-dir `"$PWD\logs`" --threshold-config `"$PWD\config\config.yaml`""  # README
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME  # README
-Register-ScheduledTask -TaskName "sysmon-agent" -Action $action -Trigger $trigger  # README
+$action   = New-ScheduledTaskAction -Execute "$PWD\.venv\Scripts\pythonw.exe" -Argument "-m sysmon --output-dir `"$PWD\logs`" --threshold-config `"$PWD\config\config.yaml`""  # README
+$trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME  # README
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)  # README
+Register-ScheduledTask -TaskName "sysmon-agent" -Action $action -Trigger $trigger -Settings $settings  # README
+$got = (Get-ScheduledTask -TaskName "sysmon-agent").Settings
+Notice "README task settings" (Describe $got)
+if ($got.DisallowStartIfOnBatteries -or $got.StopIfGoingOnBatteries -or $got.ExecutionTimeLimit -ne 'PT0S') {
+  throw "README task would not run on battery or would be stopped: $(Describe $got)"
+}
 Start-ScheduledTask -TaskName "sysmon-agent"  # README
 try {
   WaitLines logs\metrics.jsonl ($before + 2) 60
@@ -53,6 +67,38 @@ try {
 } finally {
   Unregister-ScheduledTask -TaskName "sysmon-agent" -Confirm:$false  # README
 }
+Write-Host "== Can a standard (non-administrator) user register the README task?"
+$user = 'sysmonreadme'; $pass = 'Rd!m3e2e#2026'  # <= 14 chars: longer makes net user prompt
+net user $user $pass /add /expires:never 2>&1 | Out-Null
+$dir = 'C:\sysmon-readme-user'
+New-Item -ItemType Directory -Force $dir | Out-Null
+icacls $dir /grant 'Users:(OI)(CI)M' /T /Q | Out-Null
+@'
+$ErrorActionPreference = 'Stop'
+try {
+  $action   = New-ScheduledTaskAction -Execute "C:\Windows\System32\cmd.exe" -Argument "/c exit 0"
+  $trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+  Register-ScheduledTask -TaskName "sysmon-user-test" -Action $action -Trigger $trigger -Settings $settings | Out-Null
+  "REGISTERED as $env:USERNAME"
+} catch { "FAILED as $env:USERNAME : $($_.Exception.Message)" }
+'@ | Set-Content -Path "$dir\register.ps1" -Encoding UTF8
+$secure = New-Object System.Security.SecureString
+foreach ($c in $pass.ToCharArray()) { $secure.AppendChar($c) }
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
+$psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$dir\register.ps1`""
+$psi.UserName = $user; $psi.Domain = $env:COMPUTERNAME; $psi.Password = $secure
+$psi.LoadUserProfile = $true; $psi.UseShellExecute = $false; $psi.WorkingDirectory = $dir
+$psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+$p = [System.Diagnostics.Process]::Start($psi)
+$out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEnd()
+if (-not $p.WaitForExit(120000)) { $p.Kill() }
+$result = ($out.Result + $err).Trim()
+Notice "Standard user registering the README task" $result
+Unregister-ScheduledTask -TaskName "sysmon-user-test" -Confirm:$false -ErrorAction SilentlyContinue
+if ($result -notmatch '^REGISTERED') { throw "a standard user could not register the task: $result" }
+
 Write-Host "README instructions work as written."
 # Evidence, readable from the run summary: what the agent itself logged.
 $log = (Get-Content logs\agent.log | ForEach-Object { $_ -replace '%', '%25' }) -join '%0A'

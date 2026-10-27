@@ -57,6 +57,7 @@ class Agent:
         max_log_bytes: int | None = None,
         backup_count: int = 3,
         stop_check: Callable[[], bool] | None = None,
+        before_cycle: Callable[[], None] | None = None,
         on_snapshot: Callable[[Snapshot], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
         stop_event: threading.Event | None = None,
@@ -67,6 +68,7 @@ class Agent:
         self.metrics_out = LineWriter(self.metrics_path, max_log_bytes, backup_count)
         self.alerts_out = LineWriter(self.alerts_path, max_log_bytes, backup_count)
         self.stop_check = stop_check
+        self.before_cycle = before_cycle
         self.stop_reason: str | None = None
         self.rules = rules or RuleEngine()
         self.interval = interval
@@ -113,6 +115,13 @@ class Agent:
                     late,
                 )
                 next_tick = self.clock()
+            if self.before_cycle is not None:
+                try:
+                    self.before_cycle()
+                except Exception as exc:  # noqa: BLE001 - housekeeping must not stop monitoring
+                    log.warning("pre-cycle check failed: %s", exc)
+                if self.stop_event.is_set():
+                    break
             self.run_cycle()
             if max_cycles is not None and self.cycles >= max_cycles:
                 break

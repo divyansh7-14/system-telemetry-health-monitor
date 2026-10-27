@@ -1062,13 +1062,23 @@ def phase4(out: Path, rep: Report) -> None:
         gone = not del_dir.exists()
         after = _wait_cycles(del_dir / "metrics.jsonl", 2, 30)
         alive = a4.poll() is None
-    finally:
-        a4.send_signal(signal.CTRL_BREAK_EVENT if IS_WINDOWS else signal.SIGTERM)
+        # The lock went with the folder; the agent must recreate it so --stop still works.
+        stop = run(py + ["--stop", "--output-dir", str(del_dir)])
         code = _wait_exit(a4, 10)
+    finally:
+        if a4.poll() is None:
+            a4.send_signal(signal.CTRL_BREAK_EVENT if IS_WINDOWS else signal.SIGTERM)
+            _wait_exit(a4, 10)
     rep.check(
-        "output folder deleted mid-run: recreated, agent keeps writing, clean exit",
-        gone and alive and len(after) >= 2 and code == 0,
-        f"deleted={gone} alive={alive} new cycles={[s['cycle'] for s in after]} exit={code}",
+        "output folder deleted mid-run: recreated, keeps writing, still stoppable with --stop",
+        gone
+        and alive
+        and len(after) >= 2
+        and stop.returncode == 0
+        and "has stopped" in stop.stdout
+        and code == 0,
+        f"deleted={gone} alive={alive} new cycles={[s['cycle'] for s in after]} "
+        f"stop={stop.returncode} {stop.stdout.strip()[-60:]} exit={code}",
     )
 
 

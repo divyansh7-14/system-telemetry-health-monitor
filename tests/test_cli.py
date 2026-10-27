@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import pytest
 
@@ -122,10 +123,58 @@ def test_unexpected_error_exits_1_with_traceback_in_agent_log(tmp_path, fast, mo
     monkeypatch.setattr(cli, "collect_host_info", boom)
     assert main(["--once", "--output-dir", str(tmp_path)]) == 1
     err = capsys.readouterr().err
-    assert "unexpected error: RuntimeError: something nobody expected (details in agent.log)" in err
-    log = (tmp_path / "agent.log").read_text(encoding="utf-8")
-    assert "Traceback" in log and "RuntimeError" in log
+    agent_log = tmp_path / "agent.log"
+    assert (
+        f"unexpected error: RuntimeError: something nobody expected (details in {agent_log})" in err
+    )
+    assert "Traceback" not in err  # one line on screen; the traceback is in agent.log only
+    assert len([ln for ln in err.splitlines() if not ln.startswith("INFO ")]) == 1
+    lines = agent_log.read_text(encoding="utf-8").splitlines()
+    text = "\n".join(lines)
+    assert "Traceback" in text and text.count("unexpected error, agent stopped") == 1
+    assert lines[-1].endswith("agent stopped after 0 cycle(s) (unexpected error)")
     assert not (tmp_path / "sysmon.lock").exists()  # released even on a crash
+
+
+def test_error_before_agent_log_exists_does_not_point_to_it(tmp_path, monkeypatch, capsys):
+    from sysmon import cli
+
+    def boom(path):
+        raise RuntimeError("config loader broke")
+
+    monkeypatch.setattr(cli, "load_config", boom)
+    assert main(["--once", "--output-dir", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "unexpected error: RuntimeError: config loader broke" in err
+    assert "agent.log" not in err.splitlines()[-1] and not (tmp_path / "agent.log").exists()
+
+
+def test_probe_file_is_per_process(tmp_path, monkeypatch):
+    """Two agents starting at once used to share '.write_test'; one failed with exit 3."""
+    from sysmon import cli
+
+    seen = []
+    real = Path.write_text
+
+    def spy(self, *a, **k):
+        seen.append(self.name)
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", spy)
+    cli.prepare_output_dir(str(tmp_path))
+    assert seen == [f".write_test.{os.getpid()}"]
+
+
+def test_stop_without_permission_is_a_clear_error(tmp_path, monkeypatch, capsys):
+    from sysmon import cli
+
+    def denied(out_dir):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(cli, "request_stop", denied)
+    assert main(["--stop", "--output-dir", str(tmp_path)]) == 3
+    err = capsys.readouterr().err
+    assert "cannot ask the agent" in err and "same user" in err and "Traceback" not in err
 
 
 @pytest.mark.parametrize(

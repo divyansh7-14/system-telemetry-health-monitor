@@ -15,7 +15,7 @@ from sysmon.agent import Agent, install_stop_handlers
 from sysmon.collectors.host import collect_host_info
 from sysmon.config import ConfigError, describe, load_config
 from sysmon.instance import AlreadyRunning, InstanceLock, request_stop
-from sysmon.logs import MB, setup_logging
+from sysmon.logs import FILE_ONLY, MB, setup_logging
 from sysmon.models import Snapshot
 from sysmon.reporting import format_host_info, format_network, format_snapshot, write_json_atomic
 from sysmon.rules import RuleEngine
@@ -174,7 +174,7 @@ def prepare_output_dir(path: str) -> Path:
     """Create the output directory and confirm it is writable."""
     out = Path(path).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
-    probe = out / ".write_test"
+    probe = out / f".write_test.{os.getpid()}"  # per process: two agents may start at once
     probe.write_text("ok", encoding="utf-8")
     probe.unlink()
     return out
@@ -193,10 +193,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         _error("\nsysmon: interrupted, stopping.")
         return EXIT_OK
-    except Exception as exc:  # noqa: BLE001 - last resort: one clear line, full detail in agent.log
-        logging.getLogger("sysmon").critical("unexpected error, agent stopped", exc_info=True)
-        _error(f"sysmon: unexpected error: {type(exc).__name__}: {exc} (details in agent.log)")
+    except Exception as exc:  # noqa: BLE001 - last resort: one clear line on screen
+        where = getattr(exc, "sysmon_agent_log", None)
+        if where is None:  # failed before agent.log existed: nothing else will record it
+            logging.getLogger("sysmon").critical("unexpected error", exc_info=True)
+        detail = f" (details in {where})" if where else ""
+        _error(f"sysmon: unexpected error: {type(exc).__name__}: {exc}{detail}")
         return EXIT_UNEXPECTED
+
+
+def _keep_lock(lock: InstanceLock, agent: Agent | None) -> None:
+    """Each cycle: make sure this agent still owns its folder (see InstanceLock.ensure)."""
+    if agent is not None and not lock.ensure():
+        logging.getLogger("sysmon").error(
+            "another agent has taken over %s; stopping so only one agent writes there", lock.out_dir
+        )
+        agent.stop("another agent took over the folder")
 
 
 def _error(text: str) -> None:
@@ -208,7 +220,14 @@ def _error(text: str) -> None:
 
 
 def _stop(out_dir: Path) -> int:
-    result, owner = request_stop(out_dir)
+    try:
+        result, owner = request_stop(out_dir)
+    except OSError as exc:  # e.g. the agent runs as another user and the folder is theirs
+        _error(
+            f"sysmon: cannot ask the agent using {out_dir} to stop ({exc}). Run --stop as the "
+            "same user as the agent, or stop it in Task Manager."
+        )
+        return EXIT_OUTPUT_DIR
     if result == "not-running":
         say(f"sysmon: no running agent is using {out_dir}")
         return EXIT_OK
@@ -259,10 +278,11 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_OUTPUT_DIR
 
     max_bytes = int(config.logging.max_log_mb * MB)
-    setup_logging(args.log_level, out_dir / AGENT_LOG, max_bytes, config.logging.backup_count)
     cycles = 0
     agent: Agent | None = None
+    crashed = False
     try:
+        setup_logging(args.log_level, out_dir / AGENT_LOG, max_bytes, config.logging.backup_count)
         log.info(
             "agent started: sysmon %s, PID %s, output %s, interval %ss, top %s, logs rotate at "
             "%g MB x %d",
@@ -326,6 +346,7 @@ def _run(args: argparse.Namespace) -> int:
             max_log_bytes=max_bytes,
             backup_count=config.logging.backup_count,
             stop_check=lock.stop_requested,
+            before_cycle=lambda: _keep_lock(lock, agent),
         )
         restore = install_stop_handlers(agent)
         try:
@@ -335,8 +356,17 @@ def _run(args: argparse.Namespace) -> int:
         if not args.once:
             say(f"\nsysmon: stopped after {cycles} cycle(s).")
         return EXIT_OK
+    except Exception as exc:
+        crashed = True
+        # Full traceback to agent.log only; the console gets one line from main().
+        log.critical("unexpected error, agent stopped", exc_info=True, extra=FILE_ONLY)
+        exc.sysmon_agent_log = out_dir / AGENT_LOG
+        raise
     finally:
-        reason = (agent.stop_reason if agent else None) or ("--once" if args.once else "exit")
+        if crashed:
+            reason = "unexpected error"
+        else:
+            reason = (agent.stop_reason if agent else None) or ("--once" if args.once else "exit")
         done = agent.cycles if agent else cycles
         log.info("agent stopped after %d cycle(s) (%s)", done, reason)
         lock.release()

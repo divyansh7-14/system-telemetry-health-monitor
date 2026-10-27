@@ -57,6 +57,18 @@ def burn(cores: int) -> subprocess.Popen:
     )
 
 
+OUTPUT_FILES = ("host_info.json", "console_output.txt", "sysmon.lock", "sysmon.stop")
+ROTATED = ("metrics.jsonl", "alerts.log", "agent.log")
+
+
+def is_demo_output(name: str) -> bool:
+    if name in OUTPUT_FILES:
+        return True
+    return any(
+        name == r or (name.startswith(r + ".") and name[len(r) + 1 :].isdigit()) for r in ROTATED
+    )
+
+
 def stop_load(procs: list[subprocess.Popen]) -> None:
     """Kill each load helper and its worker processes."""
     import psutil
@@ -76,11 +88,12 @@ def main() -> int:
     parser.add_argument("--output-dir", default="samples")
     args = parser.parse_args()
     out = Path(args.output_dir).resolve()
-    if out.exists():
-        for f in out.iterdir():
-            if f.is_file() and f.name != ".gitkeep":
-                f.unlink()
     out.mkdir(parents=True, exist_ok=True)
+    # Remove only the agent's own files from a previous demo; never anything else
+    # (an earlier version emptied the whole folder, deleting unrelated files).
+    for f in out.iterdir():
+        if f.is_file() and is_demo_output(f.name):
+            f.unlink()
     metrics = out / "metrics.jsonl"
     total = os.cpu_count() or 2
     first = max(1, round(total * 0.7))

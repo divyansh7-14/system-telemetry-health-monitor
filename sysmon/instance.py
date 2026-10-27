@@ -14,6 +14,7 @@ with pythonw or Task Scheduler, which has no console to press Ctrl+C in.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -23,6 +24,8 @@ from pathlib import Path
 import psutil
 
 from sysmon import __version__
+
+log = logging.getLogger(__name__)
 
 LOCK_FILE = "sysmon.lock"
 STOP_FILE = "sysmon.stop"
@@ -126,6 +129,42 @@ class InstanceLock:
             pass
         self.clear_stop_request()
         self.owner = None
+
+    def ensure(self) -> bool:
+        """Called every cycle. If the lock file vanished (e.g. the output folder was
+        deleted), write it again so `--stop` and the one-agent rule keep working.
+        Returns False only if a different live agent now owns the folder."""
+        if self.owner is None:
+            return True
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            if int(data.get("pid", -1)) == self.owner.pid:
+                return True
+        except FileNotFoundError:
+            data = None
+        except (OSError, ValueError, TypeError):
+            return True  # unreadable for a moment: do not fight over it
+        if data is not None:
+            live = read_owner(self.out_dir)
+            if live is not None and live.pid != self.owner.pid:
+                return False
+        try:
+            self.out_dir.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(
+                json.dumps(
+                    {
+                        "pid": self.owner.pid,
+                        "create_time": self.owner.create_time,
+                        "started": self.owner.started,
+                        "version": __version__,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            log.warning("lock file %s was missing (folder deleted?); recreated", self.path)
+        except OSError as exc:
+            log.debug("could not recreate lock file: %s", exc)
+        return True
 
     def stop_requested(self) -> bool:
         return self.stop_path.exists()
