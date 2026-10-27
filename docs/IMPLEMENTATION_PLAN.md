@@ -190,7 +190,9 @@ Built:
    `tests/test_readme.py` fails if the README and that script drift apart, or a linked file is missing.
 3. `samples/` — unedited output of the v1.0.0 demo on a Windows Server 2025 runner (demo run
    40480317191): `host_info.json`, `metrics.jsonl` (13 cycles), `alerts.log`, `agent.log`, `console_output.txt`.
-4. README rewritten in full, with excerpts taken from `samples/`. Version 1.0.0, tag `v1.0.0`, release.
+4. README rewritten in full, with excerpts taken from `samples/`. Version 1.0.0 (release commit `1ad3f0c`).
+   The `v1.0.0` tag and GitHub release are created by the repo owner (this build session may not create
+   tags or releases); release notes are ready.
 
 Found by reading the Windows demo output, fixed, and covered by tests:
 - **New processes were invisible in the top-CPU list for their first cycle** (76 % total CPU, top list
@@ -210,7 +212,7 @@ Verify (final acceptance, 27 Oct):
       →CRITICAL, still CRITICAL, →OK — plus a real disk WARNING from the runner's 18.8 % free C: drive),
       `agent.log`, console output
 - [x] CI green on Windows + Linux × Py 3.10/3.12/3.14 (181 unit tests; 84 e2e checks per Windows job,
-      70 per Linux job), repo public, regular commit history, tag `v1.0.0`
+      70 per Linux job) on release commit `1ad3f0c`, repo public, regular commit history
 
 ### Final check against the brief
 
