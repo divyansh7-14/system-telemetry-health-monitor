@@ -262,6 +262,21 @@ Tests after the re-review: 206 unit tests.
 | Permission issues | unwritable folder (exit 3), standard user, protected processes | e2e as a non-admin Windows user |
 | Public repo, regular commits, README, sample outputs, by 28 Oct | this repository | done 27 Oct |
 
+## Phase 6 — Submission prep ✅
+
+Reviewer's-eye pass over the repo, done 27 Oct (CI run on `b846ac6`: 6/6 jobs; README check: all 3 jobs):
+- README Testing commands assumed an activated venv; now `.venv\Scripts\python -m …` like the rest.
+- The README told reviewers to run `e2e_check.py all` on their own PC, which (as admin) created a
+  Windows account it never removed, loaded every core, allocated 1 GB and downloaded 19 MB. The
+  standard-user test now runs only in CI, and both CI scripts delete their temporary account and folder;
+  the README says what the end-to-end checks do.
+- The sample's "CPU 99.8 % but still WARNING" line is now explained in the README (anti-flapping).
+- New test: every README excerpt must match the committed `samples/` exactly (207 unit tests).
+- Repo settings (About description, topics), deleting the `demo-samples` branch and the `v1.0.0`
+  release need the owner's GitHub account; exact steps are in the presentation guide.
+- Presentation and demo guide for the mentor written (pitch, setup checklist, 5-minute live demo
+  script, repo walkthrough, likely questions, fallback, GitHub to-do).
+
 ## Requirement tracker
 
 | ID | Phase | Status |
