@@ -92,10 +92,10 @@ def format_network(s: Snapshot) -> str:
         "== Network ==",
         f"  Primary       : {n.primary_interface or '-'} ({n.primary_ip or 'offline'})",
     ]
-    for i in n.interfaces:
-        if i.is_loopback or not (i.is_up or i.ipv4):
-            continue
+    shown = [i for i in n.interfaces if not i.is_loopback and (i.is_up or i.ipv4)]
+    width = max([14] + [len(i.name) for i in shown])
+    for i in shown:
         ips = ", ".join(i.ipv4 + i.ipv6) or "no IP"
-        lines.append(f"  {i.name[:14]:<14}: {i.mac or 'no MAC'}  {ips}")
+        lines.append(f"  {i.name:<{width}}: {i.mac or 'no MAC'}  {ips}")
     lines.append(f"  Traffic counted on: {n.counted_interface or 'all non-loopback interfaces'}")
     return "\n".join(lines)

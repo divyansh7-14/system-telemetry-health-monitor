@@ -6,7 +6,11 @@ How per-process CPU is measured
 Process object*; the first call always returns 0.0. ``psutil.process_iter()``
 keeps one cached Process object per PID (and drops it if the PID is reused), so
 calling it once per cycle measures every process over the whole polling
-interval. A process seen for the first time reads 0.0 for that one cycle.
+interval. A process that started since the previous cycle has no previous
+reading (psutil returns 0.0), so its CPU is measured from its own start
+instead: CPU time used / time alive. Without this, a process that starts and
+immediately hogs the CPU would be invisible for a whole interval (found in the
+Windows demo: 76 % total CPU, top list showing 2 %).
 
 psutil reports per-process CPU where one fully used core = 100 %, so on a
 4-core machine the maximum is 400 %. We divide by the logical core count so the
@@ -16,6 +20,7 @@ value is a share of the whole machine, the same as Task Manager shows.
 from __future__ import annotations
 
 import logging
+import time
 
 import psutil
 
@@ -42,19 +47,26 @@ class ProcessSampler:
             raise ValueError("top_n must be >= 1")
         self.top_n = top_n
         self._cores = psutil.cpu_count(logical=True) or 1
+        self._seen: set[int] | None = None  # PIDs present at the previous scan
 
     def prime(self) -> None:
         """Start every process's CPU counter so the next sample has a real window."""
-        for _ in psutil.process_iter(["cpu_percent"], ad_value=None):
-            pass
+        self._seen = {p.pid for p in psutil.process_iter(["cpu_percent"], ad_value=None)}
 
     def sample(self) -> TopProcesses:
         rows: list[tuple[psutil.Process, dict]] = []
+        now = time.time()
+        current: set[int] = set()
         for proc in psutil.process_iter(_ATTRS, ad_value=None):
             info = proc.info
-            if info.get("pid") in _SKIP_PIDS:
+            pid = info.get("pid")
+            current.add(pid)
+            if pid in _SKIP_PIDS:
                 continue
+            if self._seen is not None and pid not in self._seen and not info.get("cpu_percent"):
+                info["cpu_percent"] = self._since_start(proc, now)
             rows.append((proc, info))
+        self._seen = current
 
         def cpu_key(row: tuple[psutil.Process, dict]) -> tuple[float, int]:
             return (-(row[1].get("cpu_percent") or 0.0), row[1]["pid"])
@@ -66,6 +78,17 @@ class ProcessSampler:
         by_cpu = [self._to_info(r) for r in sorted(rows, key=cpu_key)[: self.top_n]]
         by_mem = [self._to_info(r) for r in sorted(rows, key=mem_key)[: self.top_n]]
         return TopProcesses(by_cpu=by_cpu, by_memory=by_mem, total_processes=len(rows))
+
+    def _since_start(self, proc: psutil.Process, now: float) -> float:
+        """CPU % (one core = 100) of a process that started since the last scan."""
+        try:
+            t = proc.cpu_times()
+            alive = now - proc.create_time()
+        except (psutil.Error, OSError):
+            return 0.0
+        if alive < 0.2:  # too young to measure meaningfully
+            return 0.0
+        return min((t.user + t.system) / alive * 100.0, self._cores * 100.0)
 
     def _to_info(self, row: tuple[psutil.Process, dict]) -> ProcessInfo:
         proc, info = row

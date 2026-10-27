@@ -118,3 +118,44 @@ def test_unnamed_windows_kernel_process_gets_a_label(monkeypatch):
     monkeypatch.setattr(psutil, "process_iter", lambda attrs=None, ad_value=None: iter(table))
     names = {p.pid: p.name for p in ProcessSampler(top_n=3).sample().by_cpu}
     assert names == {92: PROTECTED_LABEL, 93: UNKNOWN_LABEL, 94: UNKNOWN_LABEL}
+
+
+def test_process_started_since_last_scan_is_measured_from_its_start(monkeypatch):
+    """A new process reads 0.0 from cpu_percent(); use CPU time / time alive instead."""
+    import time as _time
+    from collections import namedtuple
+
+    Times = namedtuple("Times", "user system")
+    now = 1_000_000.0
+    monkeypatch.setattr(_time, "time", lambda: now)
+    old = FakeProc(100, "old.exe", 4.0, 10 * MB)
+    new = FakeProc(200, "burner.exe", 0.0, 10 * MB)  # started 8 s ago, busy 7.9 s of it
+    new.cpu_times = lambda: Times(7.5, 0.4)
+    new.create_time = lambda: now - 8.0
+    young = FakeProc(300, "justnow.exe", 0.0, 10 * MB)
+    young.cpu_times = lambda: Times(0.01, 0.0)
+    young.create_time = lambda: now - 0.05
+    monkeypatch.setattr(psutil, "cpu_count", lambda logical=True: 4)
+    table = [old]
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs=None, ad_value=None: iter(table))
+    sampler = ProcessSampler(top_n=3)
+    sampler.prime()  # only old.exe exists
+    table[:] = [old, new, young]
+    top = sampler.sample()
+    by_pid = {p.pid: p.cpu_percent for p in top.by_cpu}
+    assert top.by_cpu[0].pid == 200
+    assert by_pid[200] == round(7.9 / 8.0 * 100 / 4, 1)  # ~24.7 % of a 4-core machine
+    assert by_pid[300] == 0.0  # too young to judge
+    assert by_pid[100] == 1.0  # existing processes keep the normal reading
+    table[:] = [old, new]
+    new.info["cpu_percent"] = 0.0  # real psutil builds a fresh info dict on every scan
+    assert {p.pid: p.cpu_percent for p in sampler.sample().by_cpu}[
+        200
+    ] == 0.0  # seen now: normal path
+
+
+def test_without_priming_nothing_is_estimated(monkeypatch):
+    p = FakeProc(1, "x", 0.0, MB)
+    p.cpu_times = lambda: (_ for _ in ()).throw(AssertionError("must not be called"))
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs=None, ad_value=None: iter([p]))
+    ProcessSampler(top_n=1).sample()

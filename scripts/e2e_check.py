@@ -611,6 +611,38 @@ def phase2(out: Path, rep: Report) -> None:
         )
 
 
+def new_process_visible(out: Path, rep: Report) -> None:
+    """A process that starts just after a cycle must appear in the very next cycle's
+    top-CPU list (it has no previous CPU reading; found missing in the Windows demo)."""
+    d = out / "newproc"
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0
+    agent = subprocess.Popen(
+        [sys.executable, "-m", "sysmon", "--interval", "10", "--output-dir", str(d)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=flags,
+    )
+    late = None
+    try:
+        _wait_cycles(d / "metrics.jsonl", 1, 30)
+        late = mp.Process(target=_burn, args=(30.0,), daemon=True)
+        late.start()
+        snaps = _wait_cycles(d / "metrics.jsonl", 2, 20)
+    finally:
+        if late is not None:
+            late.terminate()
+        agent.send_signal(signal.CTRL_BREAK_EVENT if IS_WINDOWS else signal.SIGINT)
+        _wait_exit(agent, 10)
+    expected = 100 / (os.cpu_count() or 1)
+    top = snaps[1]["top_processes"]["by_cpu"] if len(snaps) > 1 else []
+    row = next((p for p in top if p["pid"] == late.pid), None)
+    rep.check(
+        f"process started mid-interval is in the next top-CPU list (~{expected:.0f}%)",
+        row is not None and row["cpu_percent"] >= expected * 0.5 and top[0]["pid"] == late.pid,
+        f"new pid {late.pid}; top: {[(p['name'], p['pid'], p['cpu_percent']) for p in top[:3]]}",
+    )
+
+
 # --------------------------------------------------------------------- phase 3
 STAGED_CONFIG = """
 thresholds:
@@ -1250,7 +1282,7 @@ $b = RunAs '-m sysmon --once --output-dir "{base}/once"' 'once'
 
 PHASES = {
     "phase1": [phase1],
-    "phase2": [phase2],
+    "phase2": [phase2, new_process_visible],
     "phase3": [phase3],
     "phase4": [phase4],
     "robustness": [robustness],

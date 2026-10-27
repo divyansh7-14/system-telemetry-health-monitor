@@ -130,13 +130,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-log-mb",
         type=_log_mb,
         default=None,
-        help="rotate each log file when it reaches this size in MB (default: 5)",
+        help="rotate each log file at this size in MB, 0.01-1024 (default: config file, else 5)",
     )
     parser.add_argument(
         "--backup-count",
         type=_positive_int,
         default=None,
-        help="number of rotated log files to keep (default: 3)",
+        help="number of rotated log files to keep (default: config file, else 3)",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
