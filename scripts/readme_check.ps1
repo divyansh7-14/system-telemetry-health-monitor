@@ -54,4 +54,6 @@ try {
   Unregister-ScheduledTask -TaskName "sysmon-agent" -Confirm:$false  # README
 }
 Write-Host "README instructions work as written."
-Get-Content logs\agent.log
+# Evidence, readable from the run summary: what the agent itself logged.
+$log = (Get-Content logs\agent.log | ForEach-Object { $_ -replace '%', '%25' }) -join '%0A'
+Write-Output "::notice title=README check passed - agent.log::$log"
